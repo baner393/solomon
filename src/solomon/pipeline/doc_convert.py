@@ -85,9 +85,12 @@ def _web_to_markdown(url: str, timeout: int = 60) -> str | None:
 
 
 def _fetch_html(url: str, timeout: int = 60) -> str | None:
-    """带完整浏览器头抓取网页并解压（gzip/deflate/brotli），返回解码后的 HTML 文本。
+    """带浏览器指纹抓取网页并解压，返回解码后的 HTML 文本。
 
-    requests 优先（自动处理 gzip/deflate）；brotli 需手动解压。
+    抓取链（2026-09-14 实测排序）：
+      1. curl_cffi（模拟浏览器 TLS/JA3 指纹）— 过 Cloudflare 挑战站（linux.do 等）
+      2. requests（完整浏览器头 + gzip/deflate）— 普通站点
+      3. urllib 兜底
     失败返回 None（调用方降级）。
     """
     headers = {
@@ -104,27 +107,38 @@ def _fetch_html(url: str, timeout: int = 60) -> str | None:
         if v:
             proxies = {"http": v, "https": v}
             break
+
+    # 1) curl_cffi：浏览器 TLS/JA3 指纹，能过 Cloudflare 挑战
+    try:
+        from curl_cffi import requests as crequests
+        resp = crequests.get(url, impersonate="chrome", timeout=timeout,
+                             headers=headers, proxies=proxies, verify=False)
+        if resp.status_code == 200 and not _is_cf_challenge(resp.text):
+            return resp.text
+        if resp.status_code != 200:
+            print(f"[doc_convert] curl_cffi HTTP {resp.status_code}: {url}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[doc_convert] curl_cffi 抓取失败: {exc}", file=sys.stderr)
+
+    # 2) requests：普通站点
     try:
         import requests
         resp = requests.get(url, headers=headers, timeout=timeout,
                             proxies=proxies, verify=False)
-        if resp.status_code != 200:
-            print(f"[doc_convert] HTTP {resp.status_code}: {url}", file=sys.stderr)
-            return None
-        content = resp.content
-        if resp.headers.get("Content-Encoding") == "br":
-            try:
-                import brotli
-                content = brotli.decompress(content)
-            except Exception:
-                pass
-        return content.decode("utf-8", errors="replace")
-    except ImportError:
-        pass
+        if resp.status_code == 200:
+            content = resp.content
+            if resp.headers.get("Content-Encoding") == "br":
+                try:
+                    import brotli
+                    content = brotli.decompress(content)
+                except Exception:
+                    pass
+            return content.decode("utf-8", errors="replace")
+        print(f"[doc_convert] requests HTTP {resp.status_code}: {url}", file=sys.stderr)
     except Exception as exc:
-        print(f"[doc_convert] 网页抓取失败: {exc}", file=sys.stderr)
-        return None
-    # 无 requests：urllib 兜底（不解 brotli，但能拿 gzip）
+        print(f"[doc_convert] requests 抓取失败: {exc}", file=sys.stderr)
+
+    # 3) urllib 兜底
     try:
         import urllib.request
         req = urllib.request.Request(url, headers=headers)
@@ -134,6 +148,17 @@ def _fetch_html(url: str, timeout: int = 60) -> str | None:
     except Exception as exc:
         print(f"[doc_convert] urllib 抓取失败: {exc}", file=sys.stderr)
         return None
+
+
+def _is_cf_challenge(html: str) -> bool:
+    """判断是否是 Cloudflare 人机挑战页。
+
+    只用「Just a moment...」标题（挑战页专属）；不能查 challenge-platform——
+    linux.do 等 Discoursse 论坛正常页面也含该词（合法 JS 资源路径，2026-09-14 实测误判）。
+    """
+    if not html:
+        return False
+    return "Just a moment" in html or "<title>Just a moment" in html[:500]
 
 
 def _download_web_images(markdown_text: str, page_url: str, dest_dir: str) -> str:
