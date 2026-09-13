@@ -221,8 +221,18 @@ def _download_web_images(markdown_text: str, page_url: str, dest_dir: str) -> st
     def _dl(img_url: str) -> str | None:
         """下载图片到 dest_dir，返回落盘文件名；失败返回 None。"""
         try:
+            # 走代理（无代理 env 时用默认 127.0.0.1:7890，与 _fetch_html 一致）
+            proxy = None
+            for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+                v = os.environ.get(var)
+                if v:
+                    proxy = v
+                    break
+            if proxy is None:
+                proxy = "http://127.0.0.1:7890"
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
             req = urllib.request.Request(_to_abs(img_url), headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with opener.open(req, timeout=20) as resp:
                 data = resp.read()
             if len(data) < 100 or not data[:8].startswith(b"\x89PNG") and not data[:4] in (b"\xff\xd8\xff", b"GIF8", b"RIFF"):
                 return None  # 非图片内容
