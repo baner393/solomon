@@ -51,6 +51,30 @@ def _web_to_markdown(url: str, timeout: int = 60) -> str | None:
     """
     if trafilatura is None and MarkItDown is None:
         return None
+    # 整体超时保护：curl_cffi/requests 在无可用网络时可能 TCP 层卡死不触发 timeout，
+    # 用后台定时器强制在 timeout+15s 内返回（2026-09-14 实测 coordinator 子进程无代理被卡）。
+    import threading
+    _box = {}
+    def _run():
+        try:
+            _box["result"] = _web_to_markdown_impl(url, timeout)
+        except BaseException as exc:  # noqa: BLE001
+            _box["error"] = exc
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=timeout + 15)
+    if t.is_alive():
+        print(f"[doc_convert] 网页提取超时（>{timeout+15}s），放弃: {url}", file=sys.stderr)
+        return None
+    if "error" in _box:
+        print(f"[doc_convert] 网页提取异常: {_box['error']}", file=sys.stderr)
+        return None
+    return _box.get("result")
+
+
+def _web_to_markdown_impl(url: str, timeout: int = 60) -> str | None:
+    if trafilatura is None and MarkItDown is None:
+        return None
     try:
         html = _fetch_html(url, timeout=timeout)
         if html:
@@ -107,6 +131,10 @@ def _fetch_html(url: str, timeout: int = 60) -> str | None:
         if v:
             proxies = {"http": v, "https": v}
             break
+    if proxies is None:
+        # 主进程内直接调用时不经过 run() 的子进程代理注入：用默认代理兜底，
+        # 否则 coordinator 起的 ingest 进程无代理 env → 直连被墙/超时卡死（2026-09-14 实测）。
+        proxies = {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
 
     # 1) curl_cffi：浏览器 TLS/JA3 指纹，能过 Cloudflare 挑战
     try:
