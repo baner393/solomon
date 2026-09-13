@@ -44,25 +44,95 @@ def _web_to_markdown(url: str, timeout: int = 60) -> str | None:
 
     开 include_images/include_links：图文网页的图片会以 `![...](http://...)` 保留、
     参考链接保留。调用方（ingest_document）负责把图片下载进 vault 并改写引用。
+
+    抓取层自实现（不用 trafilatura.fetch_url）：带完整浏览器头 + brotli/gzip 解压，
+    兼容 Cloudflare/反爬/压缩响应站点（linux.do 等，2026-09-14 实测修）。
+    降级链：自抓取+解压 → trafilatura extract → markitdown 兜底。
     """
-    if trafilatura is None:
+    if trafilatura is None and MarkItDown is None:
         return None
     try:
-        downloaded = trafilatura.fetch_url(url)
-        if not downloaded:
-            return None
-        text = trafilatura.extract(
-            downloaded,
-            include_comments=False,
-            include_tables=True,
-            favor_precision=True,
-            include_images=True,
-            include_links=True,
-        )
-        text = (text or "").strip()
-        return text or None
+        html = _fetch_html(url, timeout=timeout)
+        if html:
+            text = trafilatura.extract(
+                html,
+                include_comments=False,
+                include_tables=True,
+                favor_precision=True,
+                include_images=True,
+                include_links=True,
+            )
+            if text and text.strip():
+                return text.strip()
+        # trafilatura 拿不到 → markitdown 整页兜底（对论坛/动态页更宽容）
+        if MarkItDown is not None:
+            r = MarkItDown().convert(url)
+            t = (r.text_content or "").strip()
+            if t:
+                return t
+        return None
     except Exception as exc:
-        print(f"[doc_convert] trafilatura 提取失败: {exc}", file=sys.stderr)
+        print(f"[doc_convert] 网页提取失败: {exc}", file=sys.stderr)
+        if MarkItDown is not None:
+            try:
+                r = MarkItDown().convert(url)
+                t = (r.text_content or "").strip()
+                if t:
+                    return t
+            except Exception as exc2:
+                print(f"[doc_convert] markitdown 兜底失败: {exc2}", file=sys.stderr)
+        return None
+
+
+def _fetch_html(url: str, timeout: int = 60) -> str | None:
+    """带完整浏览器头抓取网页并解压（gzip/deflate/brotli），返回解码后的 HTML 文本。
+
+    requests 优先（自动处理 gzip/deflate）；brotli 需手动解压。
+    失败返回 None（调用方降级）。
+    """
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+    }
+    proxies = None
+    for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        v = os.environ.get(var)
+        if v:
+            proxies = {"http": v, "https": v}
+            break
+    try:
+        import requests
+        resp = requests.get(url, headers=headers, timeout=timeout,
+                            proxies=proxies, verify=False)
+        if resp.status_code != 200:
+            print(f"[doc_convert] HTTP {resp.status_code}: {url}", file=sys.stderr)
+            return None
+        content = resp.content
+        if resp.headers.get("Content-Encoding") == "br":
+            try:
+                import brotli
+                content = brotli.decompress(content)
+            except Exception:
+                pass
+        return content.decode("utf-8", errors="replace")
+    except ImportError:
+        pass
+    except Exception as exc:
+        print(f"[doc_convert] 网页抓取失败: {exc}", file=sys.stderr)
+        return None
+    # 无 requests：urllib 兜底（不解 brotli，但能拿 gzip）
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+        return raw.decode("utf-8", errors="replace")
+    except Exception as exc:
+        print(f"[doc_convert] urllib 抓取失败: {exc}", file=sys.stderr)
         return None
 
 

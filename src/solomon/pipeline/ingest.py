@@ -2185,6 +2185,7 @@ def main():
         log(f"网页正文提取: {val}")
         content = _web_to_markdown(val)
         if not content:
+            log("❌ 网页正文提取失败（网络/反爬/压缩响应/非文章页）")
             print("❌ 网页正文提取失败（网络/反爬/非文章页），可改用文件路径或 --text")
             sys.exit(1)
         tmp = os.path.join("/tmp", f"ingest_web_{int(time.time())}.md")
