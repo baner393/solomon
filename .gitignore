@@ -35,3 +35,6 @@ perf/
 .vscode/
 *.swp
 .DS_Store
+
+# 查询语义缓存（运行时生成）
+data/query_cache.json
