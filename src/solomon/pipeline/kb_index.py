@@ -25,9 +25,11 @@ import time
 import glob
 
 # ---- 路径配置 ----
-VAULT = os.environ.get("SOLOMON_VAULT", "/mnt/d/all/ai_agent_about/solomon")
+from _paths import default_vault  # noqa: E402
+
+VAULT = default_vault()
 # FTS5 索引库：默认放 vault/.kb/（每 vault 独立索引，天然隔离，随 vault 走）。
-# 兼容旧环境：SOLOMON_FTS_DB 显式指定时用它（如迁移期指向旧 ~/.hermes/infra/data/kb_fts.db）。
+# 兼容旧环境：SOLOMON_FTS_DB 显式指定时用它（如迁移期指向旧索引目录）。
 DATA_DIR = os.environ.get("SOLOMON_FTS_DB", os.path.join(VAULT, ".kb"))
 DB_PATH = os.path.join(DATA_DIR, "kb_fts.db")
 

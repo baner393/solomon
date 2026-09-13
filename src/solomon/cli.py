@@ -206,7 +206,7 @@ def cmd_index(args: argparse.Namespace) -> int:
 
 # ── verify：断链校验 ───────────────────────────────────────────
 def cmd_verify(args: argparse.Namespace) -> int:
-    return _run(config.PYTHON, _VERIFY, [])
+    return _run(config.PYTHON, _VERIFY, [str(config.VAULT)])
 
 
 # ── 主入口 ─────────────────────────────────────────────────────

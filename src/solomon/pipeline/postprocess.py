@@ -25,10 +25,13 @@ import datetime
 import subprocess
 
 # ---- 路径 ----
-VAULT = os.environ.get("SOLOMON_VAULT", "/mnt/d/all/ai_agent_about/solomon")
+from _paths import default_vault  # noqa: E402
+from _paths import _PKG_ROOT  # noqa: E402
+
+VAULT = default_vault()
 VERIFY_SCRIPT = os.environ.get(
     "VERIFY_SOLOMON",
-    "/home/baner/.hermes/infra/assets/verify_solomon.py",
+    str(_PKG_ROOT / "assets" / "verify_solomon.py"),
 )
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kb_index import index_file, search, build_full  # noqa: E402

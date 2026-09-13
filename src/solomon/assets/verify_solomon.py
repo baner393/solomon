@@ -6,7 +6,7 @@ Solomon 入库验证脚本 — 写完文件后运行，自动检查：
 3. frontmatter 格式是否正确
 
 用法：python3 verify_solomon.py <solomon_root>
-示例：python3 verify_solomon.py "/mnt/d/all/ai_agent_about/solomon"
+示例：python3 verify_solomon.py ~/.solomon/vault
 """
 import os, re, sys, glob
 
@@ -134,7 +134,10 @@ def verify_frontmatter(solomon_root):
     return warnings
 
 if __name__ == '__main__':
-    root = sys.argv[1] if len(sys.argv) > 1 else "/mnt/d/all/ai_agent_about/solomon"
+    if len(sys.argv) < 2:
+        print("用法：python3 verify_solomon.py <solomon_root>", file=sys.stderr)
+        sys.exit(2)
+    root = sys.argv[1]
     
     print(f"验证 Solomon 知识库: {root}\n")
     

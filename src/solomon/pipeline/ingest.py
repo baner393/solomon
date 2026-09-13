@@ -41,17 +41,20 @@ import urllib.request
 
 # ---- 路径配置 ----
 # 资产已从 skill 目录独立到 infra/assets（2026-09-12）：skill 未来清理/升级不影响入库。
-# 保留环境变量覆盖以便测试/多机。
-VAULT = os.environ.get("SOLOMON_VAULT", "/mnt/d/all/ai_agent_about/solomon")
-SKILL_ASSETS = os.environ.get(
-    "SKILL_ASSETS",
-    "/home/baner/.hermes/infra/assets",
+# 保留环境变量覆盖以便测试/多机；缺省自动定位仓库内资源（无个人路径）。
+from _paths import (  # noqa: E402
+    default_assets,
+    default_python,
+    default_pythonpath,
+    default_templates,
+    default_vault,
+    default_work_root,
 )
-WORK_ROOT = os.environ.get("WORK_ROOT", "/mnt/d/ObsidianSpace/VideoNotes")
-TEMPLATE_DIR = os.environ.get(
-    "TEMPLATE_DIR",
-    "/home/baner/.hermes/infra/assets/SKILL_TEMPLATES",
-)
+
+VAULT = default_vault()
+SKILL_ASSETS = default_assets()
+WORK_ROOT = default_work_root()
+TEMPLATE_DIR = default_templates()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from llm_client import llm_json, llm_chat, vision_batch  # noqa: E402
@@ -59,10 +62,8 @@ import postprocess  # noqa: E402
 from doc_convert import _to_markdown, _web_to_markdown  # noqa: E402
 
 PROXY = os.environ.get("HTTP_PROXY", "http://127.0.0.1:7890")
-PYTHON = os.environ.get("PYTHON_BIN", "python3.14")
-PYTHONPATH = (
-    "/home/baner/.local/lib/python3.14/site-packages:/usr/lib/python3/dist-packages"
-)
+PYTHON = default_python()
+PYTHONPATH = default_pythonpath()
 
 # 字幕三级降级用 whisper 模型（与 skill 一致：medium+int8 甜点）
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")

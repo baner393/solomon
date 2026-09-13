@@ -24,7 +24,10 @@ import re
 import sys
 import time
 
-VAULT = os.environ.get("SOLOMON_VAULT", "/mnt/d/all/ai_agent_about/solomon")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pipeline"))
+from _paths import default_vault  # noqa: E402
+
+VAULT = default_vault()
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pipeline"))
 from kb_index import search, like_search, status  # noqa: E402
 from llm_client import llm_chat  # noqa: E402
