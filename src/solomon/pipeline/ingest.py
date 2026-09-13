@@ -1975,14 +1975,36 @@ def ingest_document(filepath, title=None, category="concept", web_url=None):
     with open(raw_path, "w", encoding="utf-8") as f:
         f.write(f"---\nsource_url: {web_url or 'local'}\ningested: {today}\n---\n\n{content}")
     log(f"raw 原文: {raw_path}")
-    # 2. wiki 页
+    # 2. wiki 页：raw 足够长 → LLM 五层提炼生成正式知识页（替代占位空壳）
+    #    视频侧同款：raw 原文作为笔记输入；网页图片目录作为关键帧目录（有图则 L2/L3 配图）
     cat_dir = os.path.join(VAULT, "concepts" if category == "concept" else "entities")
     os.makedirs(cat_dir, exist_ok=True)
     wiki_path = os.path.join(cat_dir, f"{topic}.md")
-    # 若已存在则跳过写入（避免覆盖）
-    if not os.path.exists(wiki_path):
-        with open(wiki_path, "w", encoding="utf-8") as f:
-            f.write(f"""---
+    es = os.environ.get("SOLOMON_DOC_SKIP_WIKI")
+    if not os.path.exists(wiki_path) and not es and len(content) > 800:
+        # 网页图片目录（已有下载的 raw/assets/<topic>/）作为配图来源
+        img_dir = os.path.join(VAULT, "raw", "assets", topic)
+        img_dir = img_dir if os.path.isdir(img_dir) else None
+        try:
+            tmp_notes = os.path.join("/tmp", f"docnotes_{int(time.time())}.md")
+            with open(tmp_notes, "w", encoding="utf-8") as f:
+                f.write(content)
+            wiki_path, _refs = llm_generate_five_layer(
+                tmp_notes, doc_title, img_dir, None,
+                raw_rel=[f"raw/articles/{os.path.basename(raw_path)}"],
+                video_type=detect_video_type(doc_title),
+            )
+            try:
+                os.remove(tmp_notes)
+            except OSError:
+                pass
+        except Exception as exc:
+            log(f"⚠️ 文档五层提炼失败，回落占位页: {exc}")
+            wiki_path = os.path.join(cat_dir, f"{topic}.md")
+            os.makedirs(cat_dir, exist_ok=True)
+            if not os.path.exists(wiki_path):
+                with open(wiki_path, "w", encoding="utf-8") as f:
+                    f.write(f"""---
 title: {doc_title}
 created: {today}
 updated: {today}
