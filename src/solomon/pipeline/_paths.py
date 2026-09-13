@@ -12,8 +12,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# 本文件在 src/solomon/pipeline/ 下 → 包根 = parents[2]
-_PKG_ROOT = Path(__file__).resolve().parents[2]
+# 本文件在 src/solomon/pipeline/ 下 → 包根 = parents[1]（/src/solomon/）
+_PKG_ROOT = Path(__file__).resolve().parents[1]
 
 
 def default_assets() -> str:
