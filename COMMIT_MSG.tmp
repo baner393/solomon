@@ -1,0 +1,10 @@
+solomon 初版骨架：uv/pyproject 工程化 + CLI(solomon ingest/ask/doctor/init/verify/index) + config 收口(默认去个人化) + FTS 索引隔离到 vault/.kb(修复跨 vault 串数据) + 核心代码零改动迁移(19 py)
+
+验证记录：
+- solomon init: EXIT=0, vault 结构完整
+- solomon doctor: 依赖/LLM端点/vault 全绿
+- solomon ask "RAG是什么" --raw: FTS5 命中生产 vault
+- solomon ask 完整链路: 结论+依据+延伸+来源页
+- solomon ingest 文档入库: raw+wiki+FTS5 索引, EXIT=0
+- 对照组: 生产 ingest.py 同文档同 vault 产物 diff 仅差"相关页"一节(生产串了生产索引, 迁移版已隔离)
+- 标题生成: LLM 正常(复用文档一级标题), 非失败回退
