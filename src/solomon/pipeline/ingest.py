@@ -59,7 +59,7 @@ TEMPLATE_DIR = default_templates()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from llm_client import llm_json, llm_chat, vision_batch  # noqa: E402
 import postprocess  # noqa: E402
-from doc_convert import _to_markdown, _web_to_markdown  # noqa: E402
+from doc_convert import _to_markdown, _web_to_markdown, _download_web_images  # noqa: E402
 
 PROXY = os.environ.get("HTTP_PROXY", "http://127.0.0.1:7890")
 PYTHON = default_python()
@@ -1920,17 +1920,31 @@ def _llm_generate_title(content, timeout=60):
         return ""
 
 
-def ingest_document(filepath, title=None, category="concept"):
+def ingest_document(filepath, title=None, category="concept", web_url=None):
     """文件/粘贴内容入库：存 raw → 建 wiki → postprocess。支持 .md/.txt/.pptx 及
-    markitdown 可转的格式（pdf/docx/xlsx/html/epub…）。"""
+    markitdown 可转的格式（pdf/docx/xlsx/html/epub…）。
+
+    web_url：非空表示内容来自网页正文，图片会下载到 vault raw/assets/<topic>/
+    并改写引用（![[文件名]]），raw frontmatter 记 source_url 为原网页。
+    """
     _lower = filepath.lower()
     if _lower.endswith(".pptx"):
-        # PPTX：用 extract-pptx.py（stdlib zipfile+ET）抽文本
+        # PPTX：用 extract-pptx.py（stdlib zipfile+ET）抽文本。
+        # 注意单文件模式 stdout 只有摘要行，须用 --output 落盘再读全文（2026-09-13 修）。
         extractor = os.path.join(SKILL_ASSETS.rstrip("/"), "extract-pptx.py")
-        code, out = run([PYTHON, extractor, filepath], timeout=300)
-        if code != 0 or not out.strip():
-            raise RuntimeError(f"PPTX 文本提取失败: {out[-500:]}")
-        content = out
+        tmp_pptx = os.path.join("/tmp", f"pptx_{int(time.time())}.txt")
+        code, _ = run([PYTHON, extractor, filepath, "--output", tmp_pptx], timeout=300)
+        if code != 0 or not os.path.exists(tmp_pptx):
+            raise RuntimeError(f"PPTX 文本提取失败: {code}（{filepath}）")
+        with open(tmp_pptx, encoding="utf-8") as f:
+            content = f.read()
+        try:
+            os.remove(tmp_pptx)
+        except OSError:
+            pass
+        content = content.strip()
+        if len(content) < 20:
+            raise RuntimeError(f"PPTX 文本提取为空（可能是纯图片型 PPT，无文字层）: {filepath}")
         log(f"PPTX 文本提取: {len(content)} 字")
     elif _lower.endswith((".md", ".txt", ".text", ".markdown", ".qmd", ".rmd")):
         with open(filepath, encoding="utf-8") as f:
@@ -1946,12 +1960,20 @@ def ingest_document(filepath, title=None, category="concept"):
     doc_title = title or _llm_generate_title(content) or _extract_title_from_content(content) or base
     topic = sanitize_filename(doc_title)
     today = datetime.date.today().isoformat()
+    # 网页来源：下载正文里的图片到 vault raw/assets/<topic>/，引用改写为 ![[文件名]]
+    if web_url and ("![" in content):
+        img_dir = os.path.join(VAULT, "raw", "assets", topic)
+        before = len(re.findall(r"!\[[^\]]*\]\([^)]+\)", content))
+        content = _download_web_images(content, web_url, img_dir)
+        after = len(re.findall(r"!\[[^\]]*\]\([^)]+\)", content))
+        dl = len(os.listdir(img_dir)) if os.path.isdir(img_dir) else 0
+        log(f"网页图片: 引用 {before}→{after}, 落盘 {dl} 张 → raw/assets/{topic}/")
     # 1. raw 原文
     raw_dir = os.path.join(VAULT, "raw", "articles")
     os.makedirs(raw_dir, exist_ok=True)
     raw_path = os.path.join(raw_dir, f"{topic}_raw.md")
     with open(raw_path, "w", encoding="utf-8") as f:
-        f.write(f"---\nsource_url: local\ningested: {today}\n---\n\n{content}")
+        f.write(f"---\nsource_url: {web_url or 'local'}\ningested: {today}\n---\n\n{content}")
     log(f"raw 原文: {raw_path}")
     # 2. wiki 页
     cat_dir = os.path.join(VAULT, "concepts" if category == "concept" else "entities")
@@ -2168,7 +2190,7 @@ def main():
         tmp = os.path.join("/tmp", f"ingest_web_{int(time.time())}.md")
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(f"来源: {val}\n\n{content}")
-        return ingest_document(tmp, title=args.title, category=args.category)
+        return ingest_document(tmp, title=args.title, category=args.category, web_url=val)
     if kind == "file":
         return ingest_document(val, title=args.title, category=args.category)
     if kind == "text":
