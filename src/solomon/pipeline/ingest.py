@@ -1405,6 +1405,104 @@ def llm_generate_notes(workdir, video_title, transcription_path, vision_path, kf
     return notes_path, used_refs
 
 
+def _raw_link_block(title: str, sources: str, raw_rel) -> str:
+    """在 wiki 页标题下生成「原文链接」块：raw 内部跳转 + 外部来源 URL（如网页）。
+
+    sources 形如 `[raw/articles/xxx_raw.md]`；raw_rel 是单个 raw 相对路径。
+    有 raw 则生成 Obsidian 内部链接 [[raw/articles/xxx]]；raw 原文里若带
+    source_url（网页），再补一个外部链接。
+    """
+    lines = []
+    raw_target = None
+    if raw_rel:
+        raw_target = raw_rel[0] if isinstance(raw_rel, (list, tuple)) else raw_rel
+    elif sources and sources not in ("[]", ""):
+        m = re.search(r"raw/articles/([\w\-\u4e00-\u9fff]+)", sources)
+        if m:
+            raw_target = f"raw/articles/{m.group(1)}"
+    if raw_target:
+        stem = os.path.splitext(raw_target)[0]
+        lines.append(f"> **📄 原文：** [[{stem}|查看原文 raw]]")
+    # 外部来源（网页入库时 raw frontmatter 记了 source_url）
+    ext = ""
+    if raw_target:
+        raw_path = os.path.join(VAULT, raw_target)
+        if os.path.exists(raw_path):
+            try:
+                with open(raw_path, encoding="utf-8") as f:
+                    head = f.read(2000)
+                m = re.search(r"source_url:\s*(\S+)", head)
+                if m:
+                    ext = m.group(1).strip()
+            except OSError:
+                pass
+    if ext:
+        lines.append(f"> **🔗 来源：** [{ext}]({ext})")
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+def _split_doc_chunks(text: str, max_chars: int = 8000) -> list:
+    """把长文档按段落边界切成块（分批提炼用）。
+
+    - 每块目标 ≤ max_chars 字，尽量在段落边界切（\n\n），避免句子被劈开
+    - 单块超限（无段落边界的长段落）则硬切
+    - 相邻小块（<min_chars）合并进邻块，减少 LLM 调用次数/提升信息密度
+    - 返回 [chunk, ...]；总长 ≤ max_chars 时返回单块
+    """
+    min_chars = 4000
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+    paras = [p for p in text.split("\n\n") if p.strip()]
+    chunks, cur = [], ""
+    for p in paras:
+        # 单段超限：按句子边界硬切，避免产生 >max_chars 的巨块
+        if len(p) > max_chars:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            sub = p
+            while len(sub) > max_chars:
+                # 在最近的句号/换行处切（保证语义完整），无则硬切
+                cut = max_chars
+                for sep in ("。", "\n", "；", "."):
+                    idx = sub.rfind(sep, max_chars // 2, max_chars)
+                    if idx > 0:
+                        cut = idx + 1
+                        break
+                chunks.append(sub[:cut])
+                sub = sub[cut:]
+            cur = sub
+            continue
+        if cur and len(cur) + len(p) + 2 > max_chars and len(cur) >= min_chars:
+            chunks.append(cur)
+            cur = p
+        else:
+            cur = f"{cur}\n\n{p}" if cur else p
+    if cur:
+        chunks.append(cur)
+    # 合并相邻小块：块 < min_chars 且后面还有块 → 并入下一块（或上一块）
+    # 合并后允许略超 max_chars（≤1.5x），且硬切阶段用同一上限避免刚合并又被切开
+    hard_cap = int(max_chars * 1.5)
+    merged = []
+    for c in chunks:
+        if merged and (len(c) < min_chars or len(merged[-1]) < min_chars) and len(merged[-1]) + len(c) <= hard_cap:
+            merged[-1] = f"{merged[-1]}\n\n{c}"
+        else:
+            merged.append(c)
+    chunks = merged
+    # 硬切超长块（罕见：单段就超限）；用与合并一致的 hard_cap
+    final = []
+    for c in chunks:
+        while len(c) > hard_cap:
+            final.append(c[:hard_cap])
+            c = c[hard_cap:]
+        final.append(c)
+    return [c for c in final if c.strip()]
+
+
 def llm_generate_five_layer(notes_path, video_title, kf_dir, vision_path, raw_rel=None,
                             signals_path=None, video_type=None, source_kind="video"):
     """LLM 生成五层知识提炼（9段模板 schema → 渲染 wiki 页）。L2/L3 配图。
@@ -1438,14 +1536,20 @@ def llm_generate_five_layer(notes_path, video_title, kf_dir, vision_path, raw_re
 """
     if is_doc:
         subject_word = "文章/文档"
-        source_req = "6. 原文金句（重点）：quotes 数组摘录 3-8 条原文中最有信息量/最精彩的原话（保留原句措辞，每条一句话，注明所属主题）。\n7. 关键数据：facts 中优先用表格列出原文里的关键数据/数字/案例（时间线、规模、收益等）。"
+        # 保真要求（对齐 ytkn「Full extract」：保全主张/例子/数字/细节，不做空泛压缩）
+        source_req = (
+            "6. 原文金句（重点）：quotes 数组摘录 3-8 条原文中最有信息量/最精彩的原话（保留原句措辞，每条一句话，注明所属主题）。\n"
+            "7. 保真提炼（重点）：这是长文/论坛帖，不是教程——禁止空泛概括。核心结论、facts、methodology 必须保留原文的"
+            "具体细节：数字（star 数/金额/时间/周期）、人名/项目名、具体事例、完整论证链。宁可多写具体证据，不要浓缩成抽象口号。\n"
+            "8. 关键数据：facts 中优先用表格列出原文里的关键数据/数字/案例（时间线、规模、收益等），至少 6 行。"
+        )
     else:
         subject_word = "视频"
         source_req = ""
     prompt = f"""请根据以下{subject_word}，生成 Solomon 五层知识提炼 JSON（L1事实/L2操作/L3原理/L4方法/L5体系）。
 {subject_word}标题：{video_title}
 要求：
-1. 五层是精华提炼不是全文复制：各段总篇幅控制在 3500 字以内（内容越长越要浓缩），禁止把原文照搬。
+1. 五层是精华提炼不是全文复制：{("各段总篇幅控制在 6000 字以内，长文/论坛帖允许保留更多细节（原文 30KB 级别时不要压缩成骨架）" if is_doc else "各段总篇幅控制在 3500 字以内（内容越长越要浓缩）")}，禁止把原文整段照搬。
 2. core_conclusions 给 3-10 条核心结论；facts/operations/principles/methodology/framework/templates 每项为 markdown 文本（可用表格/列表/代码块，facts 的一览表最多 12 行）；insights 给 3-5 条启示（字符串数组，每条一句话）；todos 给 3-5 个待研究问题（字符串数组）。
 3. 各段内容规范（9段模板）：facts=信息+知识点一览表（L1）；operations=公式速查/操作步骤/标准化流程（L2）；principles=数学推导/概念本质/设计原因（L3）；methodology=决策矩阵/适用范围/对比框架/易错清单（L4）；framework=体系定位/依赖关系/跨领域关联（L5）；templates=2-3 个可复用标准化模板；insights=3-5 条可迁移启示；todos=3-5 个待研究方向。
 4. {layer_ratio_block(video_type)}
@@ -1458,14 +1562,62 @@ def llm_generate_five_layer(notes_path, video_title, kf_dir, vision_path, raw_re
 {subject_word}内容（{"全文" if is_doc else "采样"}）：
 {notes[:30000] if is_doc else notes[:10000]}
 """
-    try:
-        obj = llm_json(
-            "你是知识库提炼专家，把技术笔记整理成 Solomon 五层知识框架，并嵌入真实关键帧配图。",
-            prompt, schema, max_retries=2, optional_keys=["images"], max_tokens=8192, timeout=420,
+    # 分块提炼：doc 长文按段落切块逐块 LLM（避免 >3万字被 30000 截断丢后半），
+    # 各块结果合并；视频/短文保持单次调用。
+    chunks = _split_doc_chunks(notes, 8000) if is_doc else [notes[:10000]]
+
+    def _gen_one(chunk_text: str, part_label: str) -> dict:
+        """对单块内容调 LLM 生成五层 JSON。失败返回空 dict。"""
+        _prompt = prompt.replace(
+            "{subject_word}内容（" + ("全文" if is_doc else "采样") + "）：\n"
+            + (notes[:30000] if is_doc else notes[:10000]),
+            f"{subject_word}内容（{part_label}）：\n{chunk_text}",
         )
-    except Exception as e:
-        log(f"⚠️ 五层提炼失败: {e}")
-        return None, []
+        try:
+            return llm_json(
+                "你是知识库提炼专家，把技术笔记整理成 Solomon 五层知识框架，并嵌入真实关键帧配图。",
+                _prompt, schema, max_retries=2, optional_keys=["images"],
+                max_tokens=12000 if is_doc else 8192, timeout=480,
+            ) or {}
+        except Exception as e:
+            log(f"⚠️ 五层提炼失败（{part_label}）: {e}")
+            return {}
+
+    if len(chunks) == 1:
+        obj = _gen_one(chunks[0], "全文")
+        if not obj:
+            return None, []
+    else:
+        # 分块多轮：逐块提炼，合并各块结果
+        objs = []
+        for i, chunk in enumerate(chunks, 1):
+            log(f"五层提炼 第 {i}/{len(chunks)} 块（{len(chunk)} 字）…")
+            objs.append(_gen_one(chunk, f"第 {i}/{len(chunks)} 部分"))
+        objs = [o for o in objs if o]
+        if not objs:
+            return None, []
+        # 合并：列表字段并集去重，markdown 字段按块拼接
+        def _uniq(items):
+            seen, out = set(), []
+            for x in items:
+                if x not in seen:
+                    seen.add(x)
+                    out.append(x)
+            return out
+        obj = {
+            "core_conclusions": _uniq([c for o in objs for c in _as_list(o.get("core_conclusions"))]),
+            "facts": "\n\n".join(o.get("facts", "") for o in objs if o.get("facts")),
+            "operations": "\n\n".join(o.get("operations", "") for o in objs if o.get("operations")),
+            "principles": "\n\n".join(o.get("principles", "") for o in objs if o.get("principles")),
+            "methodology": "\n\n".join(o.get("methodology", "") for o in objs if o.get("methodology")),
+            "framework": "\n\n".join(o.get("framework", "") for o in objs if o.get("framework")),
+            "templates": "\n\n".join(o.get("templates", "") for o in objs if o.get("templates")),
+            "insights": _uniq([x for o in objs for x in _as_list(o.get("insights"))]),
+            "todos": _uniq([x for o in objs for x in _as_list(o.get("todos"))]),
+            "quotes": _uniq([q for o in objs for q in _as_list(o.get("quotes"))]),
+            "images": [im for o in objs for im in (o.get("images") or [])],
+        }
+        log(f"五层提炼完成：{len(objs)} 块合并 → {len(obj['core_conclusions'])} 结论 / {len(obj['quotes'])} 金句")
     # 收集 L2/L3 配图（按真实文件名存在性过滤）
     imgs_by_layer = {"operations": [], "principles": []}
     used_refs = []
@@ -1521,6 +1673,8 @@ sources: {sources}
 ---
 
 # {title}
+
+{_raw_link_block(title, sources, raw_rel)}
 
 ## 一、核心结论（3分钟看懂）
 
