@@ -1406,16 +1406,21 @@ def llm_generate_notes(workdir, video_title, transcription_path, vision_path, kf
 
 
 def llm_generate_five_layer(notes_path, video_title, kf_dir, vision_path, raw_rel=None,
-                            signals_path=None, video_type=None):
+                            signals_path=None, video_type=None, source_kind="video"):
     """LLM 生成五层知识提炼（9段模板 schema → 渲染 wiki 页）。L2/L3 配图。
 
     合集模式：kf_dir / vision_path / raw_rel 均可传列表（跨分集合并）。
     video_type: detect_video_type 的结果，决定五层篇幅占比（类型动态占比）。
+    source_kind: "video"（视频，默认，含关键帧配图+信号标记）| "doc"（文档/网页，
+        全文不截断 + 要求摘录原文金句/关键数据，配图取 img_dir 里的已下载图片）。
     """
     if not notes_path or not os.path.exists(notes_path):
         return None, []
+    is_doc = source_kind == "doc"
     with open(notes_path, encoding="utf-8") as f:
-        notes = f.read()[:12000]
+        # 文档场景读全文（网页长文 30KB 不能被 12KB 截断丢弃后半细节）；
+        # 视频场景保持原截断（转写本来就有上限）。
+        notes = f.read() if is_doc else f.read()[:12000]
     # 关键帧清单（真实文件名 + 帧描述）
     manifest = build_frame_manifest(kf_dir, vision_path)
     frame_block = frame_manifest_prompt(manifest)
@@ -1429,22 +1434,29 @@ def llm_generate_five_layer(notes_path, video_title, kf_dir, vision_path, raw_re
 {sig_block}
 """
     schema = """
-{"title": string, "core_conclusions": [string], "facts": string, "operations": string, "principles": string, "methodology": string, "framework": string, "templates": string, "insights": [string], "todos": [string], "images": [{"ref": string, "note": string, "layer": string, "where": string}]}
+{"title": string, "core_conclusions": [string], "facts": string, "operations": string, "principles": string, "methodology": string, "framework": string, "templates": string, "insights": [string], "todos": [string], "quotes": [string], "images": [{"ref": string, "note": string, "layer": string, "where": string}]}
 """
-    prompt = f"""请根据以下传统笔记，生成 Solomon 五层知识提炼 JSON（L1事实/L2操作/L3原理/L4方法/L5体系）。
-视频标题：{video_title}
+    if is_doc:
+        subject_word = "文章/文档"
+        source_req = "6. 原文金句（重点）：quotes 数组摘录 3-8 条原文中最有信息量/最精彩的原话（保留原句措辞，每条一句话，注明所属主题）。\n7. 关键数据：facts 中优先用表格列出原文里的关键数据/数字/案例（时间线、规模、收益等）。"
+    else:
+        subject_word = "视频"
+        source_req = ""
+    prompt = f"""请根据以下{subject_word}，生成 Solomon 五层知识提炼 JSON（L1事实/L2操作/L3原理/L4方法/L5体系）。
+{subject_word}标题：{video_title}
 要求：
-1. 五层是精华提炼不是全文复制：各段总篇幅控制在 3500 字以内（笔记越长越要浓缩），禁止把笔记章节原文照搬。
+1. 五层是精华提炼不是全文复制：各段总篇幅控制在 3500 字以内（内容越长越要浓缩），禁止把原文照搬。
 2. core_conclusions 给 3-10 条核心结论；facts/operations/principles/methodology/framework/templates 每项为 markdown 文本（可用表格/列表/代码块，facts 的一览表最多 12 行）；insights 给 3-5 条启示（字符串数组，每条一句话）；todos 给 3-5 个待研究问题（字符串数组）。
-3. 各段内容规范（9段模板）：facts=课程/视频信息+知识点一览表（L1）；operations=公式速查/操作步骤/标准化流程（L2）；principles=数学推导/概念本质/设计原因（L3）；methodology=决策矩阵/适用范围/对比框架/易错清单（L4）；framework=体系定位/依赖关系/跨领域关联（L5）；templates=2-3 个可复用标准化模板；insights=3-5 条可迁移启示；todos=3-5 个待研究方向。
+3. 各段内容规范（9段模板）：facts=信息+知识点一览表（L1）；operations=公式速查/操作步骤/标准化流程（L2）；principles=数学推导/概念本质/设计原因（L3）；methodology=决策矩阵/适用范围/对比框架/易错清单（L4）；framework=体系定位/依赖关系/跨领域关联（L5）；templates=2-3 个可复用标准化模板；insights=3-5 条可迁移启示；todos=3-5 个待研究方向。
 4. {layer_ratio_block(video_type)}
-5. 图文结合（重点）：images 数组列出要嵌入 L2（操作手册）和 L3（底层原理）的教学配图，共 2-8 张。每张：ref 必须且只能填下方「关键帧清单」中的真实文件名（含冒号），严禁编造；note 填教学说明（一句话点明该图对应哪一步/哪个概念，读者从图里学到什么）；layer 填 "operations" 或 "principles" 表明嵌入哪一层；where 填该图要嵌入的具体位置——**从 operations/principles 正文里原样抄那个步骤标题或概念小标题**（如 "步骤 3：解压与安装" 或 "WSA 与传统模拟器的区别"），渲染时会把图插到该段落之后。没有合适的图可为空数组。
+5. 图文结合（重点）：images 数组列出要嵌入 L2（操作手册）和 L3（底层原理）的教学配图，共 2-8 张。每张：ref 必须且只能填下方「关键帧清单」中的真实文件名，严禁编造；note 填教学说明（一句话点明该图对应哪一步/哪个概念，读者从图里学到什么）；layer 填 "operations" 或 "principles" 表明嵌入哪一层；where 填该图要嵌入的具体位置——**从 operations/principles 正文里原样抄那个步骤标题或概念小标题**，渲染时会把图插到该段落之后。没有合适的图可为空数组。
+{source_req}
 {signal_req}
 关键帧清单（真实文件名 + 画面描述）：
 {frame_block}
 
-笔记内容（采样）：
-{notes[:10000]}
+{subject_word}内容（{"全文" if is_doc else "采样"}）：
+{notes[:30000] if is_doc else notes[:10000]}
 """
     try:
         obj = llm_json(
@@ -1542,7 +1554,8 @@ sources: {sources}
 
 """ + "\n".join(f"- {x}" for x in _as_list(obj.get("insights", []))) + f"""
 
-## 九、待研究问题（TODO）
+""" + (("## 九、原文金句（Quotes）\n\n"
+      + "\n".join(f"> {q}" for q in _as_list(obj.get("quotes", []))) + "\n\n") if _as_list(obj.get("quotes")) else "") + f"""## 十、待研究问题（TODO）
 
 """ + "\n".join(f"- {t}" for t in obj.get("todos", [])) + "\n"
     wiki_path = os.path.join(VAULT, "concepts", f"{sanitize_filename(title)}.md")
@@ -1993,6 +2006,7 @@ def ingest_document(filepath, title=None, category="concept", web_url=None):
                 tmp_notes, doc_title, img_dir, None,
                 raw_rel=[f"raw/articles/{os.path.basename(raw_path)}"],
                 video_type=detect_video_type(doc_title),
+                source_kind="doc",
             )
             try:
                 os.remove(tmp_notes)
