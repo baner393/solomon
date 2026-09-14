@@ -1933,6 +1933,27 @@ def _llm_generate_title(content, timeout=60):
         return ""
 
 
+def _dedupe_existing_page(topic: str, category: str) -> None:
+    """去重替换：入库前若 concepts/entities 下已存在同标题（或去掉「-五层知识提炼」
+    尾缀的变体）页面，先整体删除旧的（复用 kb_delete 清理），保证重复录入是替换
+    而不是新建（2026-09-14 新设定）。"""
+    try:
+        from kb_delete import delete_page
+    except Exception:
+        return  # 删除模块缺失时跳过去重（不阻断入库）
+    cat_dir = os.path.join(VAULT, "concepts" if category == "concept" else "entities")
+    if not os.path.isdir(cat_dir):
+        return
+    for fn in os.listdir(cat_dir):
+        if not fn.endswith(".md"):
+            continue
+        stem = os.path.splitext(fn)[0]
+        if stem == topic or stem.replace("-五层知识提炼", "") == topic.replace("-五层知识提炼", ""):
+            log(f"♻️ 检测到同标题已有页面，先删除旧页再入库: {fn}")
+            delete_page(os.path.join(cat_dir, fn))
+            break
+
+
 def ingest_document(filepath, title=None, category="concept", web_url=None):
     """文件/粘贴内容入库：存 raw → 建 wiki → postprocess。支持 .md/.txt/.pptx 及
     markitdown 可转的格式（pdf/docx/xlsx/html/epub…）。
@@ -1973,6 +1994,9 @@ def ingest_document(filepath, title=None, category="concept", web_url=None):
     doc_title = title or _llm_generate_title(content) or _extract_title_from_content(content) or base
     topic = sanitize_filename(doc_title)
     today = datetime.date.today().isoformat()
+    # 去重替换：同标题页已存在 → 先删旧（页/raw/图片/index/log/FTS/反向引用全清），
+    # 再入库，避免重复录入同一知识产生多个近似页（2026-09-14 新设定）。
+    _dedupe_existing_page(topic, category)
     # 网页来源：下载正文里的图片到 vault raw/assets/<topic>/，引用改写为 ![[文件名]]
     if web_url and ("![" in content):
         img_dir = os.path.join(VAULT, "raw", "assets", topic)
@@ -2030,6 +2054,26 @@ sources: [raw/articles/{os.path.basename(raw_path)}]
 # {doc_title}
 
 （由 ingest.py 自动创建，内容待 LLM 提炼补充）
+
+## 来源
+
+- raw/articles/{os.path.basename(raw_path)}
+""")
+    elif not os.path.exists(wiki_path) and not es:
+        # 短文本（≤800字）：直接建页（原文摘录），跳过 LLM 提炼（不值得）
+        with open(wiki_path, "w", encoding="utf-8") as f:
+            f.write(f"""---
+title: {doc_title}
+created: {today}
+updated: {today}
+type: {category}
+tags: []
+sources: [raw/articles/{os.path.basename(raw_path)}]
+---
+
+# {doc_title}
+
+{content[:2000]}
 
 ## 来源
 

@@ -30,6 +30,7 @@ _INGEST = _PKG_DIR / "pipeline" / "ingest.py"
 _QUERY = _PKG_DIR / "query" / "query_kb.py"
 _INDEX = _PKG_DIR / "pipeline" / "kb_index.py"
 _VERIFY = _PKG_DIR / "assets" / "verify_solomon.py"
+_DELETE = _PKG_DIR / "pipeline" / "kb_delete.py"
 
 # ── 帮助横幅 ──────────────────────────────────────────────────
 BANNER = r"""
@@ -209,6 +210,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return _run(config.PYTHON, _VERIFY, [str(config.VAULT)])
 
 
+# ── delete：删除笔记（清干净全部关联）────────────────────────
+def cmd_delete(args: argparse.Namespace) -> int:
+    argv = [args.target]
+    if args.dry_run:
+        argv.append("--dry-run")
+    return _run(config.PYTHON, _DELETE, argv)
+
+
 # ── 主入口 ─────────────────────────────────────────────────────
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
@@ -254,6 +263,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_verify = sub.add_parser("verify", help="校验知识库链接/断链")
     p_verify.set_defaults(fn=cmd_verify)
+
+    p_delete = sub.add_parser("delete", help="删除一篇笔记及其全部关联（页/raw/图片/index/log/FTS/引用）")
+    p_delete.add_argument("target", help="页面标题或文件路径，如：十分钟了解RAG基本原理 或 concepts/x.md")
+    p_delete.add_argument("--dry-run", action="store_true", help="只列出将删除的内容，不实际删除")
+    p_delete.set_defaults(fn=cmd_delete)
 
     return ap
 
