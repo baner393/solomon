@@ -70,27 +70,47 @@ def delete_page(target: str, dry_run: bool = False) -> bool:
             seen.add(p)
             pages.append(p)
 
-    if not pages:
-        _log(f"❌ 未找到笔记: {target}")
-        return False
-
-    page = pages[0]
-    title = os.path.splitext(os.path.basename(page))[0]
-    subdir = os.path.relpath(os.path.dirname(page), VAULT)
-    _log(f"删除笔记: {subdir}/{title}.md")
-    for extra in pages[1:]:
-        _log(f"  （也匹配: {os.path.relpath(extra, VAULT)}）")
+    # 标题：优先从匹配到的页文件取；页不存在时用传入目标推断（半删场景仍能清关联）
+    if pages:
+        page = pages[0]
+        title = os.path.splitext(os.path.basename(page))[0]
+        subdir = os.path.relpath(os.path.dirname(page), VAULT)
+        _log(f"删除笔记: {subdir}/{title}.md")
+        for extra in pages[1:]:
+            _log(f"  （也匹配: {os.path.relpath(extra, VAULT)}）")
+    else:
+        page = None
+        title = stem
+        subdir = "concepts"
+        # 页文件不存在（可能已被移走/半删）：仍继续清理 raw/assets/index/log/FTS
+        _log(f"删除笔记: {title}（页文件未找到，继续清理关联物）")
 
     deleted_any = False
 
-    # ---- 2. 页面文件本体 ----
-    if os.path.exists(page):
+    # ---- 2. 页面文件本体（页存在才删；.trash 里的同名页一并处理）----
+    if page and os.path.exists(page):
         if dry_run:
             _log(f"  [dry] 删 {os.path.relpath(page, VAULT)}")
         else:
             os.remove(page)
             _log(f"  ✓ 删页面: {os.path.relpath(page, VAULT)}")
         deleted_any = True
+
+    # ---- 2b. .trash 里的同名页（coordinator 手拼 mv 半删遗留）----
+    trash_dir = os.path.join(VAULT, ".trash")
+    if os.path.isdir(trash_dir):
+        for fn in os.listdir(trash_dir):
+            if not fn.endswith(".md"):
+                continue
+            fn_stem = os.path.splitext(fn)[0]
+            if fn_stem == title or fn_stem.replace("-五层知识提炼", "") == title.replace("-五层知识提炼", ""):
+                p = os.path.join(trash_dir, fn)
+                if dry_run:
+                    _log(f"  [dry] 删 .trash/{fn}")
+                else:
+                    os.remove(p)
+                    _log(f"  ✓ 删 .trash 残留页: {fn}")
+                deleted_any = True
 
     # ---- 3. raw 原文（_raw.md / _notes.md 及标题变体）----
     raw_dir = os.path.join(VAULT, "raw", "articles")
@@ -190,19 +210,23 @@ def _clean_log(log_path: str, title: str):
         _log(f"  ✓ log.md 移除 {n} 段")
 
 
-def _clean_fts(page_path: str, title: str, subdir: str):
+def _clean_fts(page_path, title: str, subdir: str):
     """FTS 索引：删除 kb_pages 中该页面行（path 匹配页面相对路径）。"""
     try:
         from kb_index import _db, init_db
         conn = _db()
         init_db(conn)
-        rel = os.path.relpath(page_path, VAULT).replace("\\", "/")
-        cur = conn.execute("DELETE FROM kb_pages WHERE path=?", (rel,))
-        # 也删同标题的其他可能路径（raw 等）
+        rows = 0
+        if page_path:
+            rel = os.path.relpath(page_path, VAULT).replace("\\", "/")
+            cur = conn.execute("DELETE FROM kb_pages WHERE path=?", (rel,))
+            rows += cur.rowcount or 0
+        # 也删同标题的其他可能路径（raw 等；页不存在时靠标题模式清）
         for pat in (f"raw/articles/{title}%", f"{subdir}/{title}%"):
-            conn.execute("DELETE FROM kb_pages WHERE path LIKE ?", (pat,))
+            cur = conn.execute("DELETE FROM kb_pages WHERE path LIKE ?", (pat,))
+            rows += cur.rowcount or 0
         conn.commit()
-        _log(f"  ✓ FTS 索引移除 {cur.rowcount + 1 if cur.rowcount else 0} 行（含 raw）")
+        _log(f"  ✓ FTS 索引移除 {rows} 行（含 raw）")
         conn.close()
     except Exception as exc:
         _log(f"  ⚠️ FTS 清理失败（可 solomon index update 重建）: {exc}")
