@@ -211,19 +211,29 @@ def _clean_log(log_path: str, title: str):
 
 
 def _clean_fts(page_path, title: str, subdir: str):
-    """FTS 索引：删除 kb_pages 中该页面行（path 匹配页面相对路径）。"""
+    """FTS 索引：删除 kb_pages 中该页面行（path 匹配页面相对路径）。
+
+    ⚠️ FTS5 虚拟表的 path 列是 UNINDEXED，`WHERE path LIKE` 不生效（返回空）。
+    必须用**精确等值**匹配。这里枚举标题的所有已知 path 形态逐一 DELETE。
+    """
     try:
         from kb_index import _db, init_db
         conn = _db()
         init_db(conn)
         rows = 0
+        # 精确等值候选：页本体 + raw 变体（_raw/_notes）+ 各子目录
+        cands = []
         if page_path:
-            rel = os.path.relpath(page_path, VAULT).replace("\\", "/")
-            cur = conn.execute("DELETE FROM kb_pages WHERE path=?", (rel,))
-            rows += cur.rowcount or 0
-        # 也删同标题的其他可能路径（raw 等；页不存在时靠标题模式清）
-        for pat in (f"raw/articles/{title}%", f"{subdir}/{title}%"):
-            cur = conn.execute("DELETE FROM kb_pages WHERE path LIKE ?", (pat,))
+            cands.append(os.path.relpath(page_path, VAULT).replace("\\", "/"))
+        for sub in (subdir, "raw/articles", "concepts", "entities", "comparisons"):
+            for suffix in ("", "_raw", "_notes"):
+                cands.append(f"{sub}/{title}{suffix}.md")
+        seen = set()
+        for c in cands:
+            if c in seen:
+                continue
+            seen.add(c)
+            cur = conn.execute("DELETE FROM kb_pages WHERE path=?", (c,))
             rows += cur.rowcount or 0
         conn.commit()
         _log(f"  ✓ FTS 索引移除 {rows} 行（含 raw）")

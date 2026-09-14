@@ -128,6 +128,11 @@ def step_related_pages(new_file, page_title, max_links=3):
             name = os.path.splitext(os.path.basename(path))[0]
             if name in seen:
                 continue
+            # 只推荐「页面文件真实存在」的（FTS 库可能有已删页残留索引，
+            # 直接引用会产生断链幽灵链接——2026-09-14 实测）
+            cand_path = os.path.join(VAULT, path.replace("\\", "/"))
+            if not os.path.exists(cand_path):
+                continue
             seen.add(name)
             if category in ("concept", "entity", "comparison"):
                 candidates.append(name)

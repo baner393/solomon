@@ -2145,6 +2145,9 @@ def ingest_document(filepath, title=None, category="concept", web_url=None):
         log(f"markitdown 转换: {len(content)} 字")
     base = os.path.splitext(os.path.basename(filepath))[0]
     # 标题优先 --title，其次 LLM 从内容生成，再回退第一个 # 标题，最后回退文件名
+    # 防御：--title 可能带引号（subprocess 不经 shell 时引号是字面字符），剥掉
+    if title:
+        title = title.strip().strip('"\'“”《》【】。；，,; \t\n')
     doc_title = title or _llm_generate_title(content) or _extract_title_from_content(content) or base
     topic = sanitize_filename(doc_title)
     today = datetime.date.today().isoformat()
