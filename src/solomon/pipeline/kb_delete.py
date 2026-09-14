@@ -257,12 +257,16 @@ def _clean_backlinks(title: str) -> int:
 
 def main(argv=None):
     import argparse
-    ap = argparse.ArgumentParser(prog="solomon delete", description="删除一篇笔记及其全部关联")
-    ap.add_argument("target", help="页面标题或文件路径，如：十分钟了解RAG基本原理 或 concepts/x.md")
+    ap = argparse.ArgumentParser(prog="solomon delete", description="删除一篇或多篇笔记及其全部关联")
+    ap.add_argument("targets", nargs="+", help="页面标题或文件路径（可多个，空格分隔），如：十分钟了解RAG基本原理 concepts/x.md")
     ap.add_argument("--dry-run", action="store_true", help="只列出将删除的内容，不实际删除")
     args = ap.parse_args(argv)
-    ok = delete_page(args.target, dry_run=args.dry_run)
-    return 0 if ok else 1
+    all_ok = True
+    for t in args.targets:
+        print(f"\n===== 目标: {t} =====")
+        if not delete_page(t, dry_run=args.dry_run):
+            all_ok = False
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":
