@@ -31,6 +31,7 @@ _QUERY = _PKG_DIR / "query" / "query_kb.py"
 _INDEX = _PKG_DIR / "pipeline" / "kb_index.py"
 _VERIFY = _PKG_DIR / "assets" / "verify_solomon.py"
 _DELETE = _PKG_DIR / "pipeline" / "kb_delete.py"
+_CLEAN = _PKG_DIR / "pipeline" / "clean_cache.py"
 
 # ── 帮助横幅 ──────────────────────────────────────────────────
 BANNER = r"""
@@ -197,6 +198,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
         argv += ["--top", str(args.top)]
     if args.raw:
         argv += ["--raw"]
+    if args.scope:
+        argv += ["--scope", args.scope]
     return _run(config.PYTHON, _QUERY, argv)
 
 
@@ -216,6 +219,33 @@ def cmd_delete(args: argparse.Namespace) -> int:
     if args.dry_run:
         argv.append("--dry-run")
     return _run(config.PYTHON, _DELETE, argv)
+
+
+# ── peek：临时读取（处理到传统笔记，不入库，产物落临时学习区）──
+def cmd_peek(args: argparse.Namespace) -> int:
+    argv = [args.input]
+    if args.name:
+        argv = ["--name", args.name]
+    if args.title:
+        argv += ["--title", args.title]
+    if args.workdir:
+        argv += ["--workdir", args.workdir]
+    if args.max_parts:
+        argv += ["--max-parts", str(args.max_parts)]
+    if args.fast:
+        argv += ["--fast"]
+    argv += ["--peek"]
+    return _run(config.PYTHON, _INGEST, argv)
+
+
+# ── clean-cache：清理处理中间产物（dry-run 预览 → --execute 删）─
+def cmd_clean_cache(args: argparse.Namespace) -> int:
+    argv: list[str] = []
+    if args.targets:
+        argv += ["--targets", *args.targets]
+    if args.execute:
+        argv += ["--execute"]
+    return _run(config.PYTHON, _CLEAN, argv)
 
 
 # ── 主入口 ─────────────────────────────────────────────────────
@@ -255,7 +285,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--category", help="限定分类 concept/entity/raw")
     p_ask.add_argument("--top", type=int, default=5, help="检索页数")
     p_ask.add_argument("--raw", action="store_true", help="只显示检索结果，不调 LLM")
+    p_ask.add_argument("--scope", choices=("all", "tmp", "main"), default="all",
+                       help="检索范围：all=主库+临时学习区联合；tmp=只查临时区；main=只查主库")
     p_ask.set_defaults(fn=cmd_ask)
+
+    p_peek = sub.add_parser("peek", help="临时读取（不入库）：视频处理到传统笔记，产物落临时学习区")
+    p_peek.add_argument("input", help="视频 URL / 或 --name 标题")
+    p_peek.add_argument("--name", help="按名称搜索视频")
+    p_peek.add_argument("--title", help="指定标题")
+    p_peek.add_argument("--workdir", help="临时工作目录（默认 TEMP_ROOT/标题）")
+    p_peek.add_argument("--max-parts", type=int, default=None, help="合集/分P 只取前 N 集")
+    p_peek.add_argument("--fast", action="store_true", help="跳过识图，最快出文字")
+    p_peek.set_defaults(fn=cmd_peek)
+
+    p_clean = sub.add_parser("clean-cache", help="清理处理中间产物（缓存/临时区/Windows残留）")
+    p_clean.add_argument("--targets", nargs="+", default=None, help="只清理匹配关键词的目标（默认全部）")
+    p_clean.add_argument("--execute", action="store_true", help="真实删除（默认 dry-run 预览）")
+    p_clean.set_defaults(fn=cmd_clean_cache)
 
     p_index = sub.add_parser("index", help="FTS5 索引维护")
     p_index.add_argument("action", choices=["update", "build"], default="update", nargs="?")

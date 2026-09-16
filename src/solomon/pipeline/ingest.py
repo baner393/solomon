@@ -47,6 +47,7 @@ from _paths import (  # noqa: E402
     default_python,
     default_pythonpath,
     default_templates,
+    default_temp_root,
     default_vault,
     default_work_root,
 )
@@ -54,6 +55,7 @@ from _paths import (  # noqa: E402
 VAULT = default_vault()
 SKILL_ASSETS = default_assets()
 WORK_ROOT = default_work_root()
+TEMP_ROOT = default_temp_root()
 TEMPLATE_DIR = default_templates()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1211,15 +1213,22 @@ def copy_images_to_vault(refs, kf_dirs, topic):
     return copied
 
 
-def save_raw_transcript(url, video_title, subs_path):
-    """保存转写原文到 raw/articles/<标题>_raw.md（带 frontmatter）。返回相对路径。"""
+def save_raw_transcript(url, video_title, subs_path, raw_root=None):
+    """保存转写原文到 raw/articles/<标题>_raw.md（带 frontmatter）。返回相对路径。
+
+    raw_root: 目标根。缺省 = vault 的 raw/articles（正式入库）；
+              传 workdir（peek 临时读取）时 raw 只落临时产物区，不进 vault：
+              rel 返回相对 raw_root 的路径（peek 场景仅用于定位，不入库引用）。
+    """
     title_safe = sanitize_filename(video_title)
-    raw_dir = os.path.join(VAULT, "raw", "articles")
+    raw_dir = raw_root if raw_root is not None else os.path.join(VAULT, "raw", "articles")
     os.makedirs(raw_dir, exist_ok=True)
     rel = f"raw/articles/{title_safe}_raw.md"
-    raw_path = os.path.join(VAULT, rel)
+    if raw_root is not None:
+        rel = f"{title_safe}_raw.md"
+    raw_path = os.path.join(raw_dir, rel)
     if os.path.exists(raw_path):
-        log(f"⏭️ 跳过 raw 转写（{rel} 已存在）")
+        log(f"⏭️ 跳过 raw 转写（{os.path.basename(raw_path)} 已存在）")
         return rel
     today = datetime.date.today().isoformat()
     # 转写正文
@@ -1721,8 +1730,11 @@ sources: {sources}
 
 
 def _ingest_video_single(url, video_title, workdir, force=False, duration=0,
-                         write_wiki=True, raw_title=None, images=False):
+                         write_wiki=True, raw_title=None, images=False,
+                         raw_to_vault=True):
     """单视频 pipeline 主体（合集模式下每个分集各跑一次，write_wiki=False）。
+
+    raw_to_vault: raw 转写是否进 vault（正式入库 True；peek 临时读取 False，只落 workdir）。
 
     返回 dict(notes_path, notes_refs, kf_dir, vision_path, subs, raw_rel,
               wiki_path, wiki_refs, duration)。
@@ -1779,8 +1791,9 @@ def _ingest_video_single(url, video_title, workdir, force=False, duration=0,
     # ④b 多模态交叉验证（字幕×关键帧 非对称时间窗对齐；无字幕/失败不影响主线）
     alignment_path = cross_validate_modalities(workdir, subs, kf_dir, vtype) if kf_dir else None
 
-    # ⑤ raw 转写原文入库（函数内部已存在则跳过）
-    raw_rel = save_raw_transcript(url, raw_title or video_title, subs)
+    # ⑤ raw 转写原文入库（函数内部已存在则跳过；peek 模式只落 workdir 不进 vault）
+    raw_rel = save_raw_transcript(url, raw_title or video_title, subs,
+                                  raw_root=None if raw_to_vault else workdir)
 
     # ⑥ LLM 传统笔记（按类型模板）
     notes_path = os.path.join(workdir, f"{video_title}_notes.md")
@@ -1968,6 +1981,78 @@ def ingest_video(url, title=None, workdir=None, force=False, max_parts=None, ima
     r = _ingest_video_single(url, video_title, workdir, force=force,
                              duration=meta.get("duration", 0), images=images)
     return r.get("wiki_path")
+
+
+# ================= 临时读取（--peek：处理到传统笔记，不入库） =================
+def _rebuild_tmp_index():
+    """更新临时学习区 FTS 索引（TEMP_ROOT/.kb/kb_fts.db，独立于主库）。
+
+    子进程跑 kb_index.py build（env 换 SOLOMON_VAULT/SOLOMON_FTS_DB 即独立库）。
+    失败不阻断（查询侧会静默跳过缺失的临时库）。
+    """
+    if not TEMP_ROOT or not os.path.isdir(TEMP_ROOT):
+        return
+    kb_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kb_index.py")
+    env = dict(os.environ)
+    env["SOLOMON_VAULT"] = TEMP_ROOT
+    env["SOLOMON_FTS_DB"] = os.path.join(TEMP_ROOT, ".kb")
+    try:
+        p = subprocess.run([PYTHON, kb_script, "build"], env=env, cwd=os.path.dirname(kb_script),
+                           capture_output=True, text=True, timeout=300)
+        if p.returncode == 0:
+            log("临时库索引更新: OK（TEMP_ROOT/.kb/kb_fts.db）")
+        else:
+            log(f"⚠️ 临时库索引更新失败: {p.stderr.strip()[:200]}")
+    except Exception as e:  # noqa: BLE001
+        log(f"⚠️ 临时库索引更新异常: {e}")
+
+
+def ingest_video_peek(url, title=None, workdir=None, max_parts=None, images=True):
+    """临时读取：视频处理到传统笔记（含配图），产物落临时学习区 TEMP_ROOT/<标题>。
+
+    不写 vault、不生成正式知识页、不 postprocess（write_wiki=False + raw 落 workdir）。
+    完成后把笔记挂入临时库 concepts/ 并重建临时 FTS，供 query_kb --scope 联合检索/
+    @solomon 追问。视频产物（下载/转写/关键帧/识图/notes）全部保留在临时 workdir，
+    之后可由 `ingest.py --from-notes <临时笔记> --workdir <临时目录> --title <标题>` 转正入库。
+    """
+    meta = fetch_video_metadata(url)
+    video_title = title or meta.get("title", "未命名视频")
+    if workdir is None:
+        workdir = os.path.join(TEMP_ROOT, video_title)
+    os.makedirs(workdir, exist_ok=True)
+    log(f"=== 临时读取: {video_title}（{meta.get('duration', '?')}s）"
+        f"{'[纯文字--fast]' if not images else '[配图]'}，产物落临时区，不入库 ===")
+
+    coll = fetch_bilibili_parts(url)
+    if coll:
+        log(f"⚠️ 检测到{'合集' if coll['kind'] == 'season' else '分P'}（{len(coll['parts'])} 集）："
+            f"临时读取默认只取本集；合集请用正式入库 ingest.py（含 --max-parts N 逐集）")
+
+    r = _ingest_video_single(url, video_title, workdir, force=False,
+                             duration=meta.get("duration", 0),
+                             write_wiki=False, raw_to_vault=False, images=images)
+    notes_path = r.get("notes_path")
+    if not notes_path or not os.path.exists(notes_path):
+        log("⚠️ 临时读取未生成笔记（见上方日志）")
+        return None
+
+    # 笔记挂入临时库（concepts/<标题>.md 供 FTS 索引；copy 而非 move，workdir 原笔记保留）
+    topic = sanitize_filename(video_title)
+    concept_dir = os.path.join(TEMP_ROOT, "concepts")
+    os.makedirs(concept_dir, exist_ok=True)
+    concept_path = os.path.join(concept_dir, f"{topic}.md")
+    if (not os.path.exists(concept_path)
+            or os.path.getmtime(notes_path) > os.path.getmtime(concept_path)):
+        shutil.copy2(notes_path, concept_path)
+        log(f"笔记挂入临时库: concepts/{topic}.md")
+
+    _rebuild_tmp_index()
+    log(f"✅ 临时读取完成（未入库）: {video_title}\n"
+        f"  笔记: {notes_path}\n"
+        f"  临时库页: concepts/{topic}.md\n"
+        f"  转正: python3.14 {os.path.basename(__file__)} --from-notes {notes_path} "
+        f"--workdir {workdir} --title \"{video_title}\"")
+    return concept_path
 
 
 # ================= 已有笔记 → 五层提炼 + 入库（独立入口） =================
@@ -2367,6 +2452,11 @@ def main():
                     help="进度文件：每阶段 append 一行 \"[时间][耗时] 消息\" 并 flush（供轮询推送进度）")
     ap.add_argument("--images", action="store_true",
                     help="配图版：跑关键帧/识图/图文结合（默认纯文字，跳过图片相关步骤）")
+    ap.add_argument("--peek", action="store_true",
+                    help="临时读取（不入库）：视频处理到传统笔记，产物落临时学习区 TEMP_ROOT/<标题>，"
+                         "供临时查看/@solomon 追问；可用 --from-notes 后续转正入库")
+    ap.add_argument("--fast", action="store_true",
+                    help="（配合 --peek）跳过识图，最快出文字（纯文字笔记）")
     args = ap.parse_args()
 
     if args.progress_file:
@@ -2386,6 +2476,45 @@ def main():
         return ingest_five_layer_from_notes(
             args.from_notes, title=args.title, workdir=args.workdir,
             category=args.category, force=args.force)
+
+    # 临时读取（--peek）：视频处理到传统笔记，产物落 TEMP_ROOT/<标题>，不入库
+    if args.peek:
+        if not args.skip_preflight:
+            preflight("video")
+        if args.name:
+            log(f"搜索视频: {args.name}")
+            cands = search_by_name(args.name)
+            if not cands:
+                print("❌ 未找到匹配视频（可改用 --name 加关键词，或直接传 URL）")
+                sys.exit(1)
+            for i, (t, u, pf) in enumerate(cands[:5]):
+                print(f"  [{i+1}] [{pf}] {t}\n      {u}")
+            print("（默认取第 1 个候选，如需其它请直接传 URL）")
+            return ingest_video_peek(
+                cands[0][1], title=args.title, workdir=args.workdir,
+                max_parts=args.max_parts, images=not args.fast)
+        if not args.input:
+            print("❌ --peek 需要视频 URL 或 --name 标题")
+            sys.exit(1)
+        kind, val = classify_input(args.input)
+        if kind == "url":
+            return ingest_video_peek(
+                val, title=args.title, workdir=args.workdir,
+                max_parts=args.max_parts, images=not args.fast)
+        if kind == "name":
+            log(f"按名称搜索: {val}")
+            cands = search_by_name(val)
+            if not cands:
+                print("❌ 未找到匹配视频（可改用 --name 加关键词，或直接传 URL）")
+                sys.exit(1)
+            for i, (t, u, pf) in enumerate(cands[:5]):
+                print(f"  [{i+1}] [{pf}] {t}\n      {u}")
+            print("（默认取第 1 个候选，如需其它请直接传 URL）")
+            return ingest_video_peek(
+                cands[0][1], title=args.title, workdir=args.workdir,
+                max_parts=args.max_parts, images=not args.fast)
+        print("❌ --peek 仅支持视频（网址或 --name 标题）")
+        sys.exit(1)
 
     # 输入形态 → preflight（视频全量检查，文档只查 vault + LLM 代理）
     video_mode = bool(args.name)

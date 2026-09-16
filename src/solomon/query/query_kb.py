@@ -25,14 +25,18 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pipeline"))
-from _paths import default_vault  # noqa: E402
+from _paths import default_temp_root, default_vault  # noqa: E402
 
 VAULT = default_vault()
+TEMP_ROOT = default_temp_root()
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pipeline"))
 from kb_index import search, like_search, status  # noqa: E402
 from llm_client import llm_chat  # noqa: E402
 
 INDEX_PATH = os.path.join(VAULT, "index.md")
+
+# 临时学习区独立 FTS 库（--peek 产物索引；随临时区走，与主库隔离）
+_TMP_KB = os.path.join(TEMP_ROOT, ".kb", "kb_fts.db") if TEMP_ROOT else ""
 
 
 def read_index_categories():
@@ -48,21 +52,39 @@ def read_index_categories():
     return cats
 
 
-def gather_evidence(question, top_n=5, category=None):
-    """FTS5 检索，返回命中页面列表 [(path, category, title, snippet, rank)]"""
-    q = question.strip()
+def _filter_scope(hits, category, top_n):
+    """按分类过滤 + 截断（对单个库的检索结果）。"""
     if category:
-        # 按分类过滤：先全量检索再按类别过滤
+        hits = [h for h in hits if h[1] == category]
+    return hits[:top_n]
+
+
+def gather_evidence(question, top_n=5, category=None, scope="all"):
+    """FTS5 联合检索。返回命中页面列表 [(path, category, title, snippet, rank, tag)]
+
+    scope: all=主库+临时库联合（临时命中标 tag='tmp'）；tmp=只查临时库；
+           main=只查主库。临时命中在回答/来源里标「📌 临时」。
+    """
+    q = question.strip()
+    all_hits = []
+    if scope in ("all", "main"):
         hits = search(q, top_n=top_n * 3)
-        hits = [h for h in hits if h[1] == category][:top_n]
-    else:
-        hits = search(q, top_n=top_n)
-    return hits
+        all_hits += [(*h, "main") for h in _filter_scope(hits, category, top_n * 3)]
+    if scope in ("all", "tmp") and _TMP_KB and os.path.exists(_TMP_KB):
+        try:
+            hits = search(q, top_n=top_n * 3, db_path=_TMP_KB)
+            all_hits += [(*h, "tmp") for h in _filter_scope(hits, category, top_n * 3)]
+        except Exception:  # noqa: BLE001 临时库损坏不应阻断主查询
+            pass
+    # 跨库统一按 rank 排，取 top_n（主库与临时库同表结构，rank 语义一致）
+    all_hits.sort(key=lambda h: h[4])
+    return all_hits[:top_n]
 
 
-def read_page_content(path):
-    """读页面正文（去 frontmatter），限制长度"""
-    abs_path = os.path.join(VAULT, path)
+def read_page_content(path, tag="main"):
+    """读页面正文（去 frontmatter），限制长度。tag='tmp' 读临时学习区。"""
+    root = TEMP_ROOT if tag == "tmp" else VAULT
+    abs_path = os.path.join(root, path)
     if not os.path.exists(abs_path):
         return ""
     with open(abs_path, encoding="utf-8") as f:
@@ -146,9 +168,11 @@ def answer_with_llm(question, hits):
         return cached
     # 组装上下文
     ctx_parts = []
-    for path, cat, title, snippet, rank in hits:
-        body = read_page_content(path)
-        ctx_parts.append(f"### [{cat}] {title}（{path}）\n{body}")
+    for path, cat, title, snippet, rank, tag in hits:
+        is_tmp = tag == "tmp"
+        mark = "📌 临时" if is_tmp else ""
+        body = read_page_content(path, tag)
+        ctx_parts.append(f"### {mark}[{cat}] {title}（{path}）\n{body}")
     context = "\n\n".join(ctx_parts)[:15000]
     system = (
         "你是 Solomon 知识库问答管家。根据提供的知识库页面内容回答用户问题。\n"
@@ -168,9 +192,11 @@ def answer_with_llm(question, hits):
         _cache_put(question, answer)
         return answer
     except Exception as e:
-        return f"（LLM 调用失败: {e}）\n\n" + "\n".join(
-            f"- [[{t}]]（{p}）" for p, c, t, s, r in hits
-        )
+        lines = [f"（LLM 调用失败: {e}）", ""]
+        for p, c, t, s, r, tg in hits:
+            mark = "📌 临时 " if tg == "tmp" else ""
+            lines.append(f"- {mark}[[{t}]]（{p}）")
+        return "\n".join(lines)
 
 
 def fallback_hierarchical(question):
@@ -205,17 +231,23 @@ def main():
     ap.add_argument("--category", help="限定分类 concept/entity/raw")
     ap.add_argument("--top", type=int, default=5)
     ap.add_argument("--raw", action="store_true", help="只显示检索结果，不调 LLM")
+    ap.add_argument("--scope", choices=("all", "tmp", "main"), default="all",
+                    help="检索范围：all=主库+临时学习区联合（临时命中标📌）；"
+                         "tmp=只查临时学习区；main=只查主库")
     args = ap.parse_args()
     question = " ".join(args.question)
 
-    hits = gather_evidence(question, top_n=args.top, category=args.category)
+    hits = gather_evidence(question, top_n=args.top, category=args.category,
+                           scope=args.scope)
 
     if args.raw:
-        print(f"=== FTS5 检索结果（top-{len(hits)}）===")
-        for path, cat, title, snippet, rank in hits:
-            print(f"  [{cat}] {title}  ({path})")
+        print(f"=== FTS5 检索结果（top-{len(hits)}，scope={args.scope}）===")
+        for path, cat, title, snippet, rank, tag in hits:
+            mark = "📌 临时 " if tag == "tmp" else "     "
+            print(f"  {mark}[{cat}] {title}  ({path})")
             print(f"    …{snippet}…")
-        print(f"知识库分类：{read_index_categories()}")
+        if args.scope != "tmp":
+            print(f"知识库分类：{read_index_categories()}")
         return
 
     if hits:
@@ -223,10 +255,11 @@ def main():
         # 成功时答案已流式打印到 stdout；只有失败串（以「（LLM 调用失败」开头）才需补打印
         if answer and answer.startswith("（LLM 调用失败"):
             print(answer)
-        # 附检索到的来源页
+        # 附检索到的来源页（临时来源标 📌）
         print("\n---\n📚 来源页：")
-        for path, cat, title, snippet, rank in hits:
-            print(f"- [[{title}]]（{path}）")
+        for path, cat, title, snippet, rank, tag in hits:
+            mark = "📌 临时 " if tag == "tmp" else ""
+            print(f"- {mark}[[{title}]]（{path}）")
     else:
         # 降级
         print("（FTS5 无命中，降级分级查询）\n")

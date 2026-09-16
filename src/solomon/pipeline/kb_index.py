@@ -50,9 +50,11 @@ SKIP_DIRS = {".obsidian", "assets", ".git"}
 FM_TITLE_RE = re.compile(r"^title:\s*(.+?)\s*$", re.M)
 
 
-def _db():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _db(db_path=None):
+    """打开 FTS 库。db_path 缺省用模块全局 DB_PATH（主库）；可传其他库（如临时学习区库）。"""
+    path = db_path or DB_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
@@ -264,9 +266,12 @@ def build_match_expr(query):
     return " OR ".join(f'"{t}"' for t in terms)
 
 
-def search(query, top_n=10):
-    """FTS5 检索。返回 [(rel_path, category, title, snippet, rank)]"""
-    conn = _db()
+def search(query, top_n=10, db_path=None):
+    """FTS5 检索。返回 [(rel_path, category, title, snippet, rank)]
+
+    db_path: 缺省用模块全局 DB_PATH（主库）；传其他库路径（如临时学习区 TempNotes/.kb/kb_fts.db）。
+    """
+    conn = _db(db_path)
     init_db(conn)
     # trigram 模式：中文需 ≥3 字、英文需 ≥3 字符；拆词 OR 匹配
     q = query.strip()
@@ -276,7 +281,7 @@ def search(query, top_n=10):
     match_expr = build_match_expr(q)
     if match_expr is None:
         conn.close()
-        return like_search(query, top_n)
+        return like_search(query, top_n, db_path=db_path)
     try:
         rows = conn.execute(
             """
@@ -291,14 +296,14 @@ def search(query, top_n=10):
     except sqlite3.OperationalError:
         # 语法错误（特殊字符）时退化为 LIKE
         conn.close()
-        return like_search(query, top_n)
+        return like_search(query, top_n, db_path=db_path)
     conn.close()
     return rows
 
 
-def like_search(query, top_n=10):
+def like_search(query, top_n=10, db_path=None):
     """FTS 失败时的 LIKE 兜底（大小写不敏感 + 词包含）"""
-    conn = _db()
+    conn = _db(db_path)
     results = []
     for term in re.split(r"[\s,，。；;]+", query):
         if not term:
