@@ -32,6 +32,7 @@ _INDEX = _PKG_DIR / "pipeline" / "kb_index.py"
 _VERIFY = _PKG_DIR / "assets" / "verify_solomon.py"
 _DELETE = _PKG_DIR / "pipeline" / "kb_delete.py"
 _CLEAN = _PKG_DIR / "pipeline" / "clean_cache.py"
+_PROFILE = _PKG_DIR / "pipeline" / "profile_sync.py"
 
 # ── 帮助横幅 ──────────────────────────────────────────────────
 BANNER = r"""
@@ -221,6 +222,14 @@ def cmd_delete(args: argparse.Namespace) -> int:
     return _run(config.PYTHON, _DELETE, argv)
 
 
+# ── profile：个人信息自增长档案 ────────────────────────────────
+def cmd_profile(args: argparse.Namespace) -> int:
+    argv = [args.action]
+    if args.action == "add":
+        argv.append(args.text)
+    return _run(config.PYTHON, _PROFILE, argv)
+
+
 # ── peek：临时读取（处理到传统笔记，不入库，产物落临时学习区）──
 def cmd_peek(args: argparse.Namespace) -> int:
     argv = [args.input]
@@ -314,6 +323,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_delete.add_argument("target", help="页面标题或文件路径，如：十分钟了解RAG基本原理 或 concepts/x.md")
     p_delete.add_argument("--dry-run", action="store_true", help="只列出将删除的内容，不实际删除")
     p_delete.set_defaults(fn=cmd_delete)
+
+    p_profile = sub.add_parser("profile", help="个人信息自增长档案（同步 hermes 记忆 → 知识库）")
+    p_profile.add_argument("action", choices=["sync", "add"], help="sync=同步记忆进档案；add=主动追加一条")
+    p_profile.add_argument("text", nargs="?", help="add 时的内容，如：我是XXX，在YYY工作")
+    p_profile.set_defaults(fn=cmd_profile)
 
     return ap
 

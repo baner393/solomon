@@ -2578,5 +2578,17 @@ def main():
     return ingest_video(cands[0][1], title=args.title, workdir=args.workdir, force=args.force, max_parts=args.max_parts)
 
 
+def _auto_profile_sync():
+    """入库完成后轻量同步个人信息档案（幂等：无新增则静默）。失败不影响入库。"""
+    try:
+        from profile_sync import sync as _psync
+        _psync(verbose=False)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        _auto_profile_sync()
