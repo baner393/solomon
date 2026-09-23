@@ -29,7 +29,8 @@ def strip_inline_code(content):
 # ./assets/cover.jpg 等示例文本按设计不存在，不应计入断链）
 SKIP_LINKCHECK_FILES = {"log.md", "log.md.bak", "SCHEMA.md",
                         "raw/articles/bilibili-render-markdown-skill-backup-2026-06-15.md",
-                        "raw/articles/obsidian-知识库图片问题排查指南.md"}
+                        "raw/articles/obsidian-知识库图片问题排查指南.md",
+                        "entities/用户档案.md"}  # 自增长档案：含记忆里的教学示例（如 ![[filename.jpg]]）
 
 def verify_image_paths(solomon_root):
     """检查 markdown 文件中的图片路径是否指向存在的文件"""

@@ -221,6 +221,19 @@ def add(text: str) -> int:
     return 1
 
 
+def _postprocess_archive():
+    """把档案页纳入标准入库善后：index.md 条目 + log.md 记录 + FTS 索引 + verify gate。
+    与 ingest_document 入库后同一套 postprocess 闭环（2026-09-15 补，使档案成为正式知识库页）。"""
+    if not os.path.exists(ARCHIVE_PATH):
+        return
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import postprocess
+        postprocess.main([ARCHIVE_PATH, "--category", "entity"])
+    except Exception as exc:
+        _log(f"⚠️ 档案页 postprocess 善后失败（不影响档案内容）: {exc}")
+
+
 def main(argv=None):
     import argparse
     ap = argparse.ArgumentParser(prog="solomon profile", description="个人信息自增长档案（同步 hermes 记忆 → 知识库）")
@@ -231,7 +244,10 @@ def main(argv=None):
     p_add.add_argument("text", help="如：我是XXX，在YYY工作")
     p_add.set_defaults(fn=lambda a: add(a.text))
     args = ap.parse_args(argv)
-    return args.fn(args)
+    rc = args.fn(args)
+    # 档案变更后统一走标准入库善后（index/log/FTS/verify），幂等
+    _postprocess_archive()
+    return rc
 
 
 if __name__ == "__main__":
