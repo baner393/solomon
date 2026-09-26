@@ -66,19 +66,29 @@ def gather_evidence(question, top_n=5, category=None, scope="all"):
            main=只查主库。临时命中在回答/来源里标「📌 临时」。
     """
     q = question.strip()
-    all_hits = []
+    main_hits, tmp_hits = [], []
     if scope in ("all", "main"):
         hits = search(q, top_n=top_n * 3)
-        all_hits += [(*h, "main") for h in _filter_scope(hits, category, top_n * 3)]
+        main_hits = [(*h, "main") for h in _filter_scope(hits, category, top_n * 3)]
     if scope in ("all", "tmp") and _TMP_KB and os.path.exists(_TMP_KB):
         try:
             hits = search(q, top_n=top_n * 3, db_path=_TMP_KB)
-            all_hits += [(*h, "tmp") for h in _filter_scope(hits, category, top_n * 3)]
+            tmp_hits = [(*h, "tmp") for h in _filter_scope(hits, category, top_n * 3)]
         except Exception:  # noqa: BLE001 临时库损坏不应阻断主查询
             pass
-    # 跨库统一按 rank 排，取 top_n（主库与临时库同表结构，rank 语义一致）
-    all_hits.sort(key=lambda h: h[4])
-    return all_hits[:top_n]
+    if scope == "tmp":
+        return tmp_hits[:top_n]
+    if scope == "main":
+        return main_hits[:top_n]
+    # all：临时命中保底一席。临时区内容少而短，bm25 上常被主库长文挤出 top_n，
+    # 导致「刚临时读取完就查不到」（2026-09-26 实测）；保底让临时内容始终可见（📌）。
+    merged = []
+    if tmp_hits:
+        merged.append(tmp_hits[0])
+    merged += main_hits + tmp_hits[1:]
+    # 跨库统一按 rank 排（临时库与主库同表结构，rank 语义一致），保底席之外正常竞争
+    rest = sorted(merged[1:], key=lambda h: h[4])[: top_n - 1]
+    return merged[:1] + rest
 
 
 def read_page_content(path, tag="main"):
@@ -101,10 +111,15 @@ CACHE_TTL = 24 * 3600  # 缓存保留 24 小时
 
 
 def _kb_fingerprint():
-    """KB 版本指纹：FTS 库 mtime + index.md mtime。任一变化 → 指纹变 → 缓存整体失效。"""
+    """KB 版本指纹：主库 FTS mtime + index.md mtime + 临时库 mtime。
+    任一变化 → 指纹变 → 缓存整体失效。（临时库不进指纹会导致临时读取/清理后
+    命中旧缓存，查询结果缺临时内容）"""
     db = os.path.join(_KB_DIR, "kb_fts.db")
     parts = []
-    for p in (db, INDEX_PATH):
+    paths = [db, INDEX_PATH]
+    if _TMP_KB:
+        paths.append(_TMP_KB)
+    for p in paths:
         try:
             parts.append(str(int(os.path.getmtime(p))))
         except OSError:
