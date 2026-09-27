@@ -223,13 +223,20 @@ def _to_wsl_path(path):
 
 def classify_input(arg):
     """返回 ('url'|'web'|'name'|'file'|'text', 值)。
-    'url' = 视频链接；'web' = 普通网页（trafilatura 提正文入库）。"""
+    'url' = 视频链接；'web' = 普通网页（trafilatura 提正文入库）。
+    支持从平台分享卡片的「标题 + URL」文本中提取链接。"""
     if arg.startswith("--"):
         return "text", arg
     if URL_RE.match(arg):
         return ("url" if _is_video_url(arg) else "web"), arg
     if os.path.isfile(arg) or LOCAL_FILE_RE.match(arg):
         return "file", _to_wsl_path(arg)
+    # QQ/飞书分享卡片常把标题和短链拼成一段文本；不要将整段送入名称搜索。
+    match = re.search(r"https?://[^\s<>\"']+", arg, re.I)
+    if match:
+        url = match.group(0).rstrip(".,，。;；:：!?！？)]}）】》〉\"'")
+        if URL_RE.match(url):
+            return ("url" if _is_video_url(url) else "web"), url
     return "name", arg
 
 
@@ -618,17 +625,46 @@ def _run_ytdlp(cmd_args, url, timeout, retry_extra=None):
     return code, out
 
 
+def _expand_b23_short_link(url):
+    """展开 B站短链接；Python HEAD 失败时用 curl 经下载代理重试。"""
+    def accept(candidate):
+        m = re.search(r"/video/(BV[0-9A-Za-z]+)", candidate)
+        if not m:
+            return None
+        return candidate, m.group(1)
+
+    try:
+        req = urllib.request.Request(url, method="HEAD",
+                                     headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            result = accept(r.geturl())
+        if result:
+            resolved, bvid = result
+            log(f"短链接展开 → bilibili.com/video/{bvid}")
+            return resolved
+        log("短链接 HEAD 未返回视频 BV 号，尝试 curl fallback")
+    except Exception as e:
+        log(f"短链接展开失败（Python HEAD）: {e}，尝试 curl fallback")
+
+    code, out = run([
+        "curl", "-sS", "-L", "-I", "--max-time", "15",
+        "--proxy", "http://127.0.0.1:7890", "-o", "/dev/null",
+        "-w", "%{url_effective}", "-H", "User-Agent: Mozilla/5.0", url,
+    ], timeout=20)
+    candidate = out.strip().splitlines()[-1] if out.strip() else ""
+    result = accept(candidate) if code == 0 else None
+    if result:
+        resolved, bvid = result
+        log(f"短链接展开（curl）→ bilibili.com/video/{bvid}")
+        return resolved
+    log("⚠️ 短链接 curl fallback 未解析到 BV 号，继续尝试原 URL")
+    return url
+
+
 def fetch_video_metadata(url):
     """yt-dlp 获取元数据（标题/时长/字幕/平台）。B站短链接先展开；B站 API 兜底。"""
     if "b23.tv" in url:
-        try:
-            req = urllib.request.Request(url, method="HEAD",
-                                         headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as r:
-                url = r.geturl()
-            log(f"短链接展开 → {url}")
-        except Exception as e:
-            log(f"短链接展开失败: {e}，继续原 URL")
+        url = _expand_b23_short_link(url)
     cmd = [
         "yt-dlp", "--dump-single-json", "--no-playlist", "--skip-download",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -646,7 +682,11 @@ def fetch_video_metadata(url):
     # yt-dlp 失败（B站新签名等）→ B站 API 兜底
     if "bilibili.com" in url or "b23.tv" in url:
         log("yt-dlp 元数据失败，降级 B站 API…")
-        return fetch_bilibili_metadata(url)
+        try:
+            return fetch_bilibili_metadata(url)
+        except Exception as e:
+            log(f"❌ B站元数据获取失败: {e}")
+            raise
     raise RuntimeError(f"yt-dlp 元数据获取失败: {out[-1000:]}")
 
 
@@ -1221,8 +1261,14 @@ def save_raw_transcript(url, video_title, subs_path, raw_root=None):
               rel 返回相对 raw_root 的路径（peek 场景仅用于定位，不入库引用）。
     """
     title_safe = sanitize_filename(video_title)
-    raw_dir = raw_root if raw_root is not None else os.path.join(VAULT, "raw", "articles")
-    os.makedirs(raw_dir, exist_ok=True)
+    # raw_root=None 时 rel 已含 raw/articles/ 前缀（相对 VAULT），
+    # raw_dir 必须是 VAULT 本身——若指向 vault/raw/articles 会双拼出
+    # raw/articles/raw/articles/（2026-09-27 合集正式入库全崩的根因）
+    raw_dir = raw_root if raw_root is not None else VAULT
+    if raw_root is None:
+        os.makedirs(os.path.join(VAULT, "raw", "articles"), exist_ok=True)
+    else:
+        os.makedirs(raw_dir, exist_ok=True)
     rel = f"raw/articles/{title_safe}_raw.md"
     if raw_root is not None:
         rel = f"{title_safe}_raw.md"
@@ -2485,7 +2531,7 @@ def main():
             log(f"搜索视频: {args.name}")
             cands = search_by_name(args.name)
             if not cands:
-                print("❌ 未找到匹配视频（可改用 --name 加关键词，或直接传 URL）")
+                log("❌ 未找到匹配视频（可改用 --name 加关键词，或直接传 URL）")
                 sys.exit(1)
             for i, (t, u, pf) in enumerate(cands[:5]):
                 print(f"  [{i+1}] [{pf}] {t}\n      {u}")
@@ -2505,7 +2551,7 @@ def main():
             log(f"按名称搜索: {val}")
             cands = search_by_name(val)
             if not cands:
-                print("❌ 未找到匹配视频（可改用 --name 加关键词，或直接传 URL）")
+                log("❌ 未找到匹配视频（可改用 --name 加关键词，或直接传 URL）")
                 sys.exit(1)
             for i, (t, u, pf) in enumerate(cands[:5]):
                 print(f"  [{i+1}] [{pf}] {t}\n      {u}")
@@ -2529,7 +2575,7 @@ def main():
         log(f"搜索视频: {args.name}")
         cands = search_by_name(args.name)
         if not cands:
-            print("❌ 未找到匹配视频（可改用 --name 加关键词，或直接传 URL）")
+            log("❌ 未找到匹配视频（可改用 --name 加关键词，或直接传 URL）")
             sys.exit(1)
         for i, (t, u, pf) in enumerate(cands[:5]):
             print(f"  [{i+1}] [{pf}] {t}\n      {u}")
@@ -2570,7 +2616,7 @@ def main():
     log(f"按名称搜索: {val}")
     cands = search_by_name(val)
     if not cands:
-        print("❌ 未找到匹配视频（可改用 --name 加关键词，或直接传 URL）")
+        log("❌ 未找到匹配视频（可改用 --name 加关键词，或直接传 URL）")
         sys.exit(1)
     for i, (t, u, pf) in enumerate(cands[:5]):
         print(f"  [{i+1}] [{pf}] {t}\n      {u}")
