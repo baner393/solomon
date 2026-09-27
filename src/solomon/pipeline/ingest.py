@@ -597,9 +597,14 @@ def fetch_bilibili_parts(url):
                             "bvid": ep.get("bvid"), "cid": ep.get("cid"),
                             "page": None, "duration": dur})
         if len(eps) > 1:
+            # 记录请求的 bvid 在合集内的位置：默认只入分享链接指向的这一集
+            # （2026-09-27 行为变更，批量入库需显式 --all-parts / --max-parts N）
+            req_idx = next((i for i, ep in enumerate(eps) if ep.get("bvid") == bvid), None)
             return {"kind": "season",
                     "series_title": season.get("title") or d.get("title"),
-                    "parts": eps}
+                    "parts": eps,
+                    "requested_bvid": bvid,
+                    "requested_index": req_idx}
     # 分P（同一 BV 多个 page）
     pages = d.get("pages") or []
     if len(pages) > 1:
@@ -2002,9 +2007,12 @@ def ingest_video_collection(coll, series_title, workdir, force=False, images=Fal
     return None
 
 
-def ingest_video(url, title=None, workdir=None, force=False, max_parts=None, images=False):
+def ingest_video(url, title=None, workdir=None, force=False, max_parts=None, images=False,
+                 all_parts=False):
     """视频完整 pipeline。自动识别 合集/分P；默认断点续跑（产物存在则跳过）。
 
+    合集行为（2026-09-27 变更）：URL 指向合集成员时**默认只入这一集**（单视频路径）；
+    all_parts=True 入整个合集；max_parts=N 入合集前 N 集。分P 不受影响（保持全部分 P）。
     max_parts: 合集/分P 只处理前 N 集（尝鲜/测试用；None = 全部）。
     images: 配图版（关键帧/识图/图文结合）；默认 False = 纯文字，跳过图片相关步骤。
     """
@@ -2017,7 +2025,15 @@ def ingest_video(url, title=None, workdir=None, force=False, max_parts=None, ima
 
     # 合集/分P 判断（B站：ugc_season = 合集，videos>1 = 分P）
     coll = fetch_bilibili_parts(url)
-    if coll:
+    if coll and not all_parts and not max_parts and coll.get("kind") == "season" \
+            and coll.get("requested_bvid"):
+        # 默认：只入分享链接指向的这一集（降级单视频路径，独立出笔记+五层页）
+        log(f"检测到合集「{coll['series_title']}」（共 {len(coll['parts'])} 集）→ "
+            f"默认只入分享的这一集；要批量入库请加「全部入库」（CLI --all-parts）"
+            f"或「前N集」（CLI --max-parts N）")
+        url = f"https://www.bilibili.com/video/{coll['requested_bvid']}"
+        coll = None
+    elif coll:
         if max_parts and len(coll["parts"]) > max_parts:
             log(f"合集共 {len(coll['parts'])} 集，--max-parts={max_parts} 只处理前 {max_parts} 集")
             coll["parts"] = coll["parts"][:max_parts]
@@ -2493,7 +2509,9 @@ def main():
                     help="忽略已有产物全量重跑（默认断点续跑：产物存在则跳过）")
     ap.add_argument("--skip-preflight", action="store_true", help="跳过环境自检")
     ap.add_argument("--max-parts", type=int, default=None,
-                    help="合集/分P 只处理前 N 集（默认全部）")
+                    help="合集/分P 只处理前 N 集（配合合集批量入库）")
+    ap.add_argument("--all-parts", action="store_true",
+                    help="合集 URL 入全部集数（默认只入分享链接指向的这一集）")
     ap.add_argument("--progress-file", metavar="PATH",
                     help="进度文件：每阶段 append 一行 \"[时间][耗时] 消息\" 并 flush（供轮询推送进度）")
     ap.add_argument("--images", action="store_true",
@@ -2592,7 +2610,7 @@ def main():
 
     kind, val = classify_input(args.input)
     if kind == "url":
-        return ingest_video(val, title=args.title, workdir=args.workdir, force=args.force, max_parts=args.max_parts, images=args.images)
+        return ingest_video(val, title=args.title, workdir=args.workdir, force=args.force, max_parts=args.max_parts, images=args.images, all_parts=args.all_parts)
     if kind == "web":
         log(f"网页正文提取: {val}")
         content = _web_to_markdown(val)
