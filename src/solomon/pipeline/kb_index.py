@@ -230,26 +230,54 @@ def index_file(abs_path):
 def build_match_expr(query):
     """把自然语言查询拆成 FTS5 可匹配的词组（trigram 兼容）。
 
-    trigram tokenizer 只对 ≥3 字符的连续串建索引，因此：
-    - 中文：优先 jieba 分词取 ≥3 字有效词（过滤停用词），拆不出再退回 ≥3 字连续串
-    - 英文：保留 ≥3 字符的单词
-    - 用 OR 连接，任一命中即返回
+    trigram tokenizer 只对 ≥3 字符的连续串建索引，2 字词 MATCH 恒为 0（2026-09-27
+    实测：'烂尾' MATCH=0 而 LIKE=1）。因此中文实词不能只按 jieba 词边界取——
+    「AI编程项目为什么总是烂尾」jieba 切出的核心词全是 2 字（编程/项目/烂尾），
+    逐词过滤后只剩「为什么」，命中完全跑偏。策略：
+    - ① jieba 分词 + 停用词过滤 + **相邻短词合并**：连续的 1-2 字短词拼成 ≥3 字
+      连续串（「编程+项目」→「编程项目」、「总是+烂尾」→「总是烂尾」），查询词序
+      通常与正文一致，这些串能被 trigram 命中
+    - ② 兜底：中文连续段 ≥3 字（jieba 不可用时）
+    - ③ 英文单词 ≥3 字符
     """
     terms = []
-    # ① jieba 分词（可用时）——自然问句拆出有效词，避免整句当短语匹配导致 0 命中
     try:
         import jieba  # noqa: F401
         _STOP = {
             "概括", "一下", "这个", "那个", "知识", "什么", "关于", "从", "到",
             "的", "是", "我", "你", "他", "知道", "介绍", "讲讲", "说", "了",
             "吗", "呢", "啊", "和", "与", "或", "在", "有", "一个", "哪些",
-            "怎么", "如何", "请", "给我", "讲讲", "聊", "聊聊", "想", "了解",
+            "怎么", "如何", "请", "给我", "聊", "聊聊", "想", "了解",
+            # 2026-09-27 补漏：疑问/指代/口语动作词（此前「为什么」漏网成为唯一命中词）
+            "为什么", "看看", "说说", "想想", "哪里", "哪个", "怎样", "咋样",
+            "怎么样", "多少", "多久", "说啥", "分别", "刚刚", "刚才", "就是",
+            "还是", "但是", "然后", "现在", "之前", "以后", "需要", "可以",
         }
+        buf = ""  # 相邻短词合并缓冲
+        def _flush():
+            nonlocal buf
+            if len(buf) >= 3 and buf not in terms:
+                terms.append(buf)
+            buf = ""
         for w in jieba.lcut(query):
             w = w.strip()
-            if len(w) >= 3 and w not in _STOP and not w.isascii():
+            if not w:
+                continue
+            if w.isascii():
+                _flush()  # 英文/数字打断合并（英文由 ③ 处理）
+                continue
+            if w in _STOP:
+                _flush()
+                continue
+            if len(w) >= 3:
+                _flush()
                 if w not in terms:
                     terms.append(w)
+            else:
+                buf += w  # 1-2 字短词：合并成连续串
+                if len(buf) >= 8:  # 防超长
+                    _flush()
+        _flush()
     except ImportError:
         pass
     # ② 兜底：中文连续串 ≥3 字（jieba 不可用或没拆出词时）
@@ -263,7 +291,7 @@ def build_match_expr(query):
             terms.append(m)
     if not terms:
         return None
-    return " OR ".join(f'"{t}"' for t in terms)
+    return " OR ".join(f'"{t}"' for t in terms[:10])
 
 
 def search(query, top_n=10, db_path=None):
