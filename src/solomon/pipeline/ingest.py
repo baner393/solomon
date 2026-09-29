@@ -221,6 +221,29 @@ def _to_wsl_path(path):
     return path.replace('\\', '/')
 
 
+def locate_missing_file(path):
+    """路径样输入但文件不存在时，用 basename 在常见根下定位真实文件（2026-09-29
+    飞书死循环：❌ 报错里打印拼坏路径 → 用户复制报错重发 → 永远错）。
+
+    返回命中列表（去重）。浅层 maxdepth 限深 + 限时，Windows 盘慢不阻塞主线。
+    """
+    base = os.path.basename(path.replace("\\", "/"))
+    if not base or len(base) < 4 or not re.search(r"\.(md|txt|docx?|pptx?|pdf|epub|xlsx?)$", base, re.I):
+        return []
+    hits = []
+    for root, depth in (("/home/baner", 5), ("/mnt/d", 4), ("/mnt/c/Users", 4)):
+        if not os.path.isdir(root):
+            continue
+        try:
+            out = subprocess.run(
+                ["find", root, "-maxdepth", str(depth), "-name", base, "-not", "-path", "*/.git/*"],
+                capture_output=True, text=True, timeout=15).stdout
+            hits += [l.strip() for l in out.splitlines() if l.strip()]
+        except Exception:  # noqa: BLE001 超时/失败就用已得结果继续
+            pass
+    return list(dict.fromkeys(hits))
+
+
 def classify_input(arg):
     """返回 ('url'|'web'|'name'|'file'|'file_missing'|'text', 值)。
     'url' = 视频链接；'web' = 普通网页（trafilatura 提正文入库）；
@@ -2652,6 +2675,16 @@ def main():
     if kind == "file":
         return ingest_document(val, title=args.title, category=args.category)
     if kind == "file_missing":
+        # 自动纠正：basename 在常见根下定位真实文件，唯一命中直接改用它（破复制死循环）
+        located = locate_missing_file(val)
+        if len(located) == 1:
+            log(f"🔧 路径不存在（疑似复制变形），已按文件名自动定位: {located[0]}")
+            return ingest_document(located[0], title=args.title, category=args.category)
+        if len(located) > 1:
+            log(f"❌ 路径不存在，且文件名有 {len(located)} 处命中，请明确发其中一个：")
+            for h in located[:5]:
+                log(f"   - {h}")
+            sys.exit(1)
         log(f"❌ 路径样输入但文件不存在: {val}")
         print(f"❌ 文件路径不存在: {val}\n"
               f"   请检查：① 冒号是否被转成全角（D：→ D:）② 路径是否有多余/重复段"
