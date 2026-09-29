@@ -229,8 +229,17 @@ def classify_input(arg):
     支持从平台分享卡片的「标题 + URL」文本中提取链接。"""
     if arg.startswith("--"):
         return "text", arg
-    # Windows 路径经 IM/微信传输可能把半角冒号转全角（D：\...）；路径判定前归一化
-    path_like = re.sub(r"^([A-Za-z])：", r"\1:", arg) if re.match(r"^[A-Za-z]：", arg) else arg
+    # 路径形态归一化（按用户常见粘贴形态）：
+    # ① Windows 资源管理器复制的 WSL UNC：\\wsl.localhost\<发行版>\rest → /rest
+    #    （Ubuntu 是发行版名，直接丢弃）
+    # ② IM/输入法把半角盘符冒号转全角：D：\ → D:\
+    m_unc = re.match(r"^\\\\wsl(?:\.localhost|\$)\\[^\\]+\\(.+)", arg)
+    if m_unc:
+        path_like = "/" + m_unc.group(1).replace(chr(92), "/")
+    elif re.match(r"^[A-Za-z]：", arg):
+        path_like = re.sub(r"^([A-Za-z])：", r"\1:", arg)
+    else:
+        path_like = arg
     if URL_RE.match(path_like):
         return ("url" if _is_video_url(path_like) else "web"), path_like
     if LOCAL_FILE_RE.match(path_like):
