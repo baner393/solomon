@@ -222,21 +222,35 @@ def _to_wsl_path(path):
 
 
 def classify_input(arg):
-    """返回 ('url'|'web'|'name'|'file'|'text', 值)。
-    'url' = 视频链接；'web' = 普通网页（trafilatura 提正文入库）。
+    """返回 ('url'|'web'|'name'|'file'|'file_missing'|'text', 值)。
+    'url' = 视频链接；'web' = 普通网页（trafilatura 提正文入库）；
+    'file_missing' = 路径样输入但文件不存在（禁止掉进名称搜索——2026-09-29 事故：
+    全角冒号 Windows 路径被当 B站搜索词，模糊匹配到标题恰为路径的旧视频并误入库）。
     支持从平台分享卡片的「标题 + URL」文本中提取链接。"""
     if arg.startswith("--"):
         return "text", arg
-    if URL_RE.match(arg):
-        return ("url" if _is_video_url(arg) else "web"), arg
-    if os.path.isfile(arg) or LOCAL_FILE_RE.match(arg):
-        return "file", _to_wsl_path(arg)
+    # Windows 路径经 IM/微信传输可能把半角冒号转全角（D：\...）；路径判定前归一化
+    path_like = re.sub(r"^([A-Za-z])：", r"\1:", arg) if re.match(r"^[A-Za-z]：", arg) else arg
+    if URL_RE.match(path_like):
+        return ("url" if _is_video_url(path_like) else "web"), path_like
+    if LOCAL_FILE_RE.match(path_like):
+        wsl = _to_wsl_path(path_like)
+        if os.path.isfile(wsl):
+            return "file", wsl
+        # 盘符路径样但文件不存在 → 明确报错（原行为是下游 open 崩溃/静默中断）
+        return "file_missing", wsl
     # QQ/飞书分享卡片常把标题和短链拼成一段文本；不要将整段送入名称搜索。
     match = re.search(r"https?://[^\s<>\"']+", arg, re.I)
     if match:
         url = match.group(0).rstrip(".,，。;；:：!?！？)]}）】》〉\"'")
         if URL_RE.match(url):
             return ("url" if _is_video_url(url) else "web"), url
+    # 路径样（盘符开头 / 含反斜杠或多级分隔+文档扩展名）但文件不存在 → 显式报错，
+    # 绝不拿路径文本去 B站名称搜索
+    if re.match(r"^[A-Za-z]:[\\/]", path_like) or (
+            ("\\" in arg or arg.count("/") >= 2)
+            and re.search(r"\.(md|txt|docx?|pptx?|pdf|epub|xlsx?)\s*$", arg, re.I)):
+        return "file_missing", path_like
     return "name", arg
 
 
@@ -2577,6 +2591,10 @@ def main():
             return ingest_video_peek(
                 cands[0][1], title=args.title, workdir=args.workdir,
                 max_parts=args.max_parts, images=not args.fast)
+        if kind == "file_missing":
+            log(f"❌ 路径样输入但文件不存在: {val}")
+            print(f"❌ 文件路径不存在: {val}（检查全角冒号/路径段）")
+            sys.exit(1)
         print("❌ --peek 仅支持视频（网址或 --name 标题）")
         sys.exit(1)
 
@@ -2624,6 +2642,12 @@ def main():
         return ingest_document(tmp, title=args.title, category=args.category, web_url=val)
     if kind == "file":
         return ingest_document(val, title=args.title, category=args.category)
+    if kind == "file_missing":
+        log(f"❌ 路径样输入但文件不存在: {val}")
+        print(f"❌ 文件路径不存在: {val}\n"
+              f"   请检查：① 冒号是否被转成全角（D：→ D:）② 路径是否有多余/重复段"
+              f"③ 文件是否真的在那。确认后重发。")
+        sys.exit(1)
     if kind == "text":
         # 写入临时文件走文档入库
         tmp = os.path.join("/tmp", f"ingest_{int(time.time())}.md")
