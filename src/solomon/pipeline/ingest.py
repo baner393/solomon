@@ -2687,5 +2687,20 @@ def _auto_profile_sync():
 if __name__ == "__main__":
     try:
         main()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        log("❌ 入库被手动中断")
+        raise
+    except Exception as e:  # noqa: BLE001
+        # 顶层兜底（2026-09-29 用户要求）：任何未预期异常都必须写进进度流（→watcher
+        # 推送给用户），不允许崩溃后进度文件停在最后一行正常日志、用户端静默无响应
+        import traceback
+        tb = traceback.format_exc()
+        log(f"❌ 入库异常终止: {type(e).__name__}: {e}")
+        log("❌ 完整堆栈见 stderr 落盘日志（/tmp/ingest_stderr_*.log）")
+        sys.stderr.write(tb)
+        sys.stderr.flush()
+        sys.exit(1)
     finally:
         _auto_profile_sync()
