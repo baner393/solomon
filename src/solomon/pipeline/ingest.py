@@ -1671,8 +1671,10 @@ def llm_generate_five_layer(notes_path, video_title, kf_dir, vision_path, raw_re
 {notes[:30000] if is_doc else notes[:10000]}
 """
     # 分块提炼：doc 长文按段落切块逐块 LLM（避免 >3万字被 30000 截断丢后半），
-    # 各块结果合并；视频/短文保持单次调用。
-    chunks = _split_doc_chunks(notes, 8000) if is_doc else [notes[:10000]]
+    # 各块结果合并；视频/短文保持单次调用。合并笔记（合集/分P）>8KB 同样分块
+    # ——2026-10-01 事故：亚马逊 9P 合并笔记 23KB 被视频模式 notes[:10000] 截断，
+    # P5-P9（选品/广告/发货实操）没进五层提炼。
+    chunks = _split_doc_chunks(notes, 8000) if (is_doc or len(notes) > 8000) else [notes]
 
     def _gen_one(chunk_text: str, part_label: str) -> dict:
         """对单块内容调 LLM 生成五层 JSON。失败返回空 dict。"""
