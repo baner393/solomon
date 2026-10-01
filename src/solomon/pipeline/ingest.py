@@ -632,7 +632,17 @@ def fetch_bilibili_parts(url):
     if info.get("code") != 0:
         return None
     d = info["data"]
-    # 合集（ugc_season：多个独立 BV 组成的系列）
+    # 分P（同一 BV 多个 page）——优先于合集（2026-10-01 事故：亚马逊视频 9P 属合集，
+    # 原 season 优先把 9P 压成合集单集、只处理了 P1，选品/投广告/发货内容全丢。
+    # 分享的视频自身是多段时，「分享的这一集」= 它的全部 P）
+    pages = d.get("pages") or []
+    if len(pages) > 1:
+        parts = [{"title": p.get("part") or f"P{p.get('page')}",
+                  "bvid": bvid, "cid": p.get("cid"), "page": p.get("page"),
+                  "duration": p.get("duration") or 0}
+                 for p in pages]
+        return {"kind": "multi-p", "series_title": d.get("title"), "parts": parts}
+    # 合集（ugc_season：多个独立 BV 组成的系列）——仅请求视频为单 P 时启用
     season = d.get("ugc_season")
     if season:
         eps = []
@@ -651,14 +661,6 @@ def fetch_bilibili_parts(url):
                     "parts": eps,
                     "requested_bvid": bvid,
                     "requested_index": req_idx}
-    # 分P（同一 BV 多个 page）
-    pages = d.get("pages") or []
-    if len(pages) > 1:
-        parts = [{"title": p.get("part") or f"P{p.get('page')}",
-                  "bvid": bvid, "cid": p.get("cid"), "page": p.get("page"),
-                  "duration": p.get("duration") or 0}
-                 for p in pages]
-        return {"kind": "multi-p", "series_title": d.get("title"), "parts": parts}
     return None
 
 
