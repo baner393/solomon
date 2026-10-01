@@ -254,10 +254,24 @@ def build_match_expr(query):
             "还是", "但是", "然后", "现在", "之前", "以后", "需要", "可以",
         }
         buf = ""  # 相邻短词合并缓冲
+
+        def _add_terms(w):
+            """≥3 字词加入 terms；>6 字按 4 字滑窗(步长2)切子串——2026-10-01 实测：
+            jieba 把「跨境电商外贸实操」切成整词 8 字，正文无此连续串 → MATCH 0 命中，
+            而「跨境电商」4 字单独查 1 命中。滑窗让长词命中其真实存在的子串。"""
+            if len(w) <= 6:
+                if w not in terms:
+                    terms.append(w)
+                return
+            for i in range(0, len(w) - 3, 2):
+                sub = w[i:i + 4]
+                if sub not in terms:
+                    terms.append(sub)
+
         def _flush():
             nonlocal buf
-            if len(buf) >= 3 and buf not in terms:
-                terms.append(buf)
+            if len(buf) >= 3:
+                _add_terms(buf)
             buf = ""
         for w in jieba.lcut(query):
             w = w.strip()
@@ -271,8 +285,7 @@ def build_match_expr(query):
                 continue
             if len(w) >= 3:
                 _flush()
-                if w not in terms:
-                    terms.append(w)
+                _add_terms(w)
             else:
                 buf += w  # 1-2 字短词：合并成连续串
                 if len(buf) >= 8:  # 防超长
