@@ -127,13 +127,29 @@ def _collect():
     return items
 
 
+# 区域中文说法 → kind 别名（「清理缓存 临时」这类自然说法也能命中对应区域；
+# 临时区路径是英文 TempNotes/，子串匹配永远够不到「临时」二字）
+_KIND_ALIASES = {
+    "临时": "tmp", "临时区": "tmp", "临时学习区": "tmp",
+    "工作目录": "work", "工作区": "work", "正式": "work", "视频": "work",
+    "残留": "junk", "垃圾": "junk", "windows": "junk",
+}
+
+
 def _filter_targets(items, targets):
-    """按关键词过滤：名称（或路径）包含任一 target 子串。空 targets = 全部。"""
+    """按关键词过滤：名称（或路径）包含任一 target 子串；
+    另支持区域说法（临时/工作目录/残留…）按 kind 别名整区命中。
+    空 targets = 全部。"""
     if not targets:
         return items
+    kinds = set()
+    for t in targets:
+        alias = _KIND_ALIASES.get(t) or _KIND_ALIASES.get(t.lower())
+        if alias:
+            kinds.add(alias)
     out = []
     for kind, name, path, is_dir in items:
-        if any(t in name or t in path for t in targets):
+        if kind in kinds or any(t in name or t in path for t in targets):
             out.append((kind, name, path, is_dir))
     return out
 
