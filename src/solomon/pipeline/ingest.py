@@ -695,9 +695,15 @@ def _run_ytdlp(cmd_args, url, timeout, retry_extra=None):
 
 
 def _expand_b23_short_link(url):
-    """展开 B站短链接；Python HEAD 失败时用 curl 经下载代理重试。"""
+    """展开 B站短链接；Python HEAD 失败时用 curl 重试。
+
+    2026-10-03 修复：原 curl 实现为 -L 跟随到视频页取 %{url_effective}，
+    但跟随第二跳（www.bilibili.com 视频页 HEAD）会 TLS 失败 exit≠0（SSL EOF，
+    B站边缘节点风控），代码在 code≠0 时丢弃输出——其实第一跳 302 的
+    Location 头里就有 BV 号。改为：①只 HEAD 第一跳抓 Location；
+    ②-L 跟随兜底（exit≠0 也接受 url_effective）。"""
     def accept(candidate):
-        m = re.search(r"/video/(BV[0-9A-Za-z]+)", candidate)
+        m = re.search(r"/video/(BV[0-9A-Za-z]+)", candidate or "")
         if not m:
             return None
         return candidate, m.group(1)
@@ -715,13 +721,28 @@ def _expand_b23_short_link(url):
     except Exception as e:
         log(f"短链接展开失败（Python HEAD）: {e}，尝试 curl fallback")
 
+    # ① 只 HEAD 第一跳（不跟随），302 的 Location 即目标视频页（含 BV 号）
     code, out = run([
+        "curl", "-sS", "-I", "--max-time", "15",
+        "--proxy", "http://127.0.0.1:7890", "-D", "-", "-o", "/dev/null",
+        "-H", "User-Agent: Mozilla/5.0", url,
+    ], timeout=20)
+    if code == 0:
+        m = re.search(r"(?im)^location:\s*(\S+)", out)
+        result = accept(m.group(1)) if m else None
+        if result:
+            resolved, bvid = result
+            log(f"短链接展开（curl 302）→ bilibili.com/video/{bvid}")
+            return resolved
+
+    # ② -L 跟随兜底：即使 curl exit≠0（视频页 TLS 被掐），url_effective 也已含 BV
+    code2, out2 = run([
         "curl", "-sS", "-L", "-I", "--max-time", "15",
         "--proxy", "http://127.0.0.1:7890", "-o", "/dev/null",
         "-w", "%{url_effective}", "-H", "User-Agent: Mozilla/5.0", url,
     ], timeout=20)
-    candidate = out.strip().splitlines()[-1] if out.strip() else ""
-    result = accept(candidate) if code == 0 else None
+    candidate = out2.strip().splitlines()[-1] if out2.strip() else ""
+    result = accept(candidate)
     if result:
         resolved, bvid = result
         log(f"短链接展开（curl）→ bilibili.com/video/{bvid}")
