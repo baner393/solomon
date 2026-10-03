@@ -94,11 +94,19 @@ def log(msg):
     _progress(msg)
 
 
-def run(cmd, timeout=1800, env_extra=None, check=False, bg=False):
-    """执行命令，返回 (code, stdout+stderr)。支持后台运行。"""
+def run(cmd, timeout=1800, env_extra=None, check=False, bg=False, direct=False):
+    """执行命令，返回 (code, stdout+stderr)。支持后台运行。
+    direct=True: 清空代理 env 直连——B站是国内站，本机直连稳定，而代理出口 IP
+    被 B站 TLS 风控掐断（2026-10-03 事故：7890 出口访问 api/www.bilibili.com
+    全部 SSL EOF，B站 API 元数据 JSONDecodeError）。"""
     env = dict(os.environ)
-    env.setdefault("http_proxy", PROXY)
-    env.setdefault("https_proxy", PROXY)
+    if direct:
+        for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                  "all_proxy", "ALL_PROXY"):
+            env.pop(k, None)
+    else:
+        env.setdefault("http_proxy", PROXY)
+        env.setdefault("https_proxy", PROXY)
     env.setdefault("PYTHONPATH", PYTHONPATH)
     if env_extra:
         env.update(env_extra)
@@ -610,8 +618,11 @@ def fetch_bilibili_metadata(url):
         "curl", "-s", "--max-time", "15",
         f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
         "-H", f"User-Agent: {UA}",
-    ], timeout=30)
-    info = json.loads(out)
+    ], timeout=30, direct=True)
+    try:
+        info = json.loads(out)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"B站 API 返回非 JSON（可能风控/网络异常）: {out[:120]!r}")
     if info.get("code") != 0:
         raise RuntimeError(f"B站 API 错误: {info.get('message')}")
     d = info["data"]
@@ -640,7 +651,7 @@ def fetch_bilibili_parts(url):
         "curl", "-s", "--max-time", "15",
         f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}",
         "-H", f"User-Agent: {UA}",
-    ], timeout=30)
+    ], timeout=30, direct=True)
     try:
         info = json.loads(out)
     except Exception:
@@ -724,9 +735,9 @@ def _expand_b23_short_link(url):
     # ① 只 HEAD 第一跳（不跟随），302 的 Location 即目标视频页（含 BV 号）
     code, out = run([
         "curl", "-sS", "-I", "--max-time", "15",
-        "--proxy", "http://127.0.0.1:7890", "-D", "-", "-o", "/dev/null",
+        "-D", "-", "-o", "/dev/null",
         "-H", "User-Agent: Mozilla/5.0", url,
-    ], timeout=20)
+    ], timeout=20, direct=True)  # b23.tv 直连 302 正常；代理出口曾正常但直连少一层依赖
     if code == 0:
         m = re.search(r"(?im)^location:\s*(\S+)", out)
         result = accept(m.group(1)) if m else None
@@ -738,9 +749,9 @@ def _expand_b23_short_link(url):
     # ② -L 跟随兜底：即使 curl exit≠0（视频页 TLS 被掐），url_effective 也已含 BV
     code2, out2 = run([
         "curl", "-sS", "-L", "-I", "--max-time", "15",
-        "--proxy", "http://127.0.0.1:7890", "-o", "/dev/null",
+        "-o", "/dev/null",
         "-w", "%{url_effective}", "-H", "User-Agent: Mozilla/5.0", url,
-    ], timeout=20)
+    ], timeout=20, direct=True)
     candidate = out2.strip().splitlines()[-1] if out2.strip() else ""
     result = accept(candidate)
     if result:
@@ -751,6 +762,11 @@ def _expand_b23_short_link(url):
     return url
 
 
+def _is_bilibili_url(url: str) -> bool:
+    """B站是国内站：直连稳定，代理出口 IP 反而被 B站 TLS 风控（2026-10-03）。"""
+    return "bilibili.com" in url or "b23.tv" in url
+
+
 def fetch_video_metadata(url):
     """yt-dlp 获取元数据（标题/时长/字幕/平台）。B站短链接先展开；B站 API 兜底。"""
     if "b23.tv" in url:
@@ -758,8 +774,9 @@ def fetch_video_metadata(url):
     cmd = [
         "yt-dlp", "--dump-single-json", "--no-playlist", "--skip-download",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "--proxy", "http://127.0.0.1:7890",
     ]
+    # B站直连（--proxy "" 覆盖 env 注入的代理）；YouTube 等海外源走 7890
+    cmd += ["--proxy", ""] if _is_bilibili_url(url) else ["--proxy", PROXY]
     code, out = _run_ytdlp(cmd, url, timeout=120)
     # yt-dlp 可能一边打印元数据 JSON 一边因次要错误返回非零（如 mweb PO Token 警告），
     # 所以不看退出码，直接从输出里抓 JSON
@@ -799,8 +816,8 @@ def download_video(url, workdir):
         "-o", os.path.join(workdir, "video.%(ext)s"),
         "--write-thumbnail", "--convert-thumbnails", "jpg",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "--proxy", "http://127.0.0.1:7890",
     ]
+    cmd += ["--proxy", ""] if _is_bilibili_url(url) else ["--proxy", PROXY]
     code, out = _run_ytdlp(cmd, url, timeout=3600,
                            retry_extra=["-f", "18/best[ext=mp4]/b"])
     # 找到实际下载的视频文件（可能是 video.mp4 或 video.webm 等）
@@ -856,7 +873,7 @@ def download_bilibili_api(url, workdir):
         "curl", "-s",
         f"https://api.bilibili.com/x/player/playurl?bvid={bvid}&cid={cid}&qn=64&fnval=4048",
         "-H", f"User-Agent: {UA}", "-H", "Referer: https://www.bilibili.com/",
-    ], timeout=30)
+    ], timeout=30, direct=True)
     play = json.loads(out)
     dash = play["data"]["dash"]
     # 选 H.264 视频流 + 音频流
@@ -874,7 +891,7 @@ def download_bilibili_api(url, workdir):
             "-H", "Referer: https://www.bilibili.com/",
             "-H", "Origin: https://www.bilibili.com",
             "--connect-timeout", "30", "--max-time", "900", u,
-        ], timeout=1000)
+        ], timeout=1000, direct=True)  # bilivideo CDN 国内直连更快更稳
     # 4. 合并
     out_path = os.path.join(workdir, "video.mp4")
     code, out = run([
@@ -928,8 +945,9 @@ def get_subtitles(url, workdir, video_path):
     subs_path = os.path.join(workdir, "subtitles.json")
     cmd = ["yt-dlp", "--write-subs", "--sub-langs", "zh-Hans,zh-CN,zh,en,ai-zh",
            "--skip-download", "--no-playlist",
-           "--user-agent", "Mozilla/5.0", "--proxy", "http://127.0.0.1:7890",
+           "--user-agent", "Mozilla/5.0",
            "-o", os.path.join(workdir, "subs.%(ext)s")]
+    cmd += ["--proxy", ""] if _is_bilibili_url(url) else ["--proxy", PROXY]
     cookie = os.environ.get("BILI_COOKIE", "").strip()
     if cookie:
         cmd += ["--add-headers", f"Cookie: {cookie}"]
