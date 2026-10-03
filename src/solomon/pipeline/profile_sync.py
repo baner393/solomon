@@ -26,7 +26,7 @@ import datetime
 from _paths import default_vault
 
 VAULT = os.environ.get("SOLOMON_VAULT", default_vault())
-HERMES_HOME = os.environ.get("HERMES_HOME", "/home/baner/.hermes")
+HERMES_HOME = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
 PROFILES_DIR = os.path.join(HERMES_HOME, "profiles")
 
 ARCHIVE_REL = "entities/用户档案.md"
