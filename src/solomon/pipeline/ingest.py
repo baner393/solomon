@@ -251,6 +251,13 @@ def classify_input(arg):
     全角冒号 Windows 路径被当 B站搜索词，模糊匹配到标题恰为路径的旧视频并误入库）。
     支持从平台分享卡片的「标题 + URL」文本中提取链接。"""
     if arg.startswith("--"):
+        # 纯 flag 形态（--name xxx / --text xxx）。混合形态（如「--images【标题】 URL」，
+        # 2026-10-03 实测被整串判 text 入库成文档）先尝试提取 URL。
+        inner = re.search(r"https?://[^\s<>\"']+", arg, re.I)
+        if inner:
+            url = inner.group(0).rstrip(".,，。;；:：!?！？)]}）】》〉\"'")
+            if URL_RE.match(url) and _is_video_url(url):
+                return "url", url
         return "text", arg
     # 路径形态归一化（按用户常见粘贴形态）：
     # ① Windows 资源管理器复制的 WSL UNC：\\wsl.localhost\<发行版>\rest → /rest
@@ -272,11 +279,20 @@ def classify_input(arg):
         # 盘符路径样但文件不存在 → 明确报错（原行为是下游 open 崩溃/静默中断）
         return "file_missing", wsl
     # QQ/飞书分享卡片常把标题和短链拼成一段文本；不要将整段送入名称搜索。
-    match = re.search(r"https?://[^\s<>\"']+", arg, re.I)
+    # 手打/部分分享是裸短链（无 scheme）：b23.tv/xxx、bilibili.com/video/BVxxx。
+    # 裸形态只认已知视频域名——普通句子里出现的裸域名不当网页处理。
+    match = (re.search(r"https?://[^\s<>\"']+", arg, re.I)
+             or re.search(
+                 r"(?<![\w.])(?:www\.)?(?:"
+                 + "|".join(h.replace(".", r"\.") for h in _VIDEO_HOSTS)
+                 + r")/[^\s<>\"']+", arg, re.I))
     if match:
         url = match.group(0).rstrip(".,，。;；:：!?！？)]}）】》〉\"'")
         if URL_RE.match(url):
             return ("url" if _is_video_url(url) else "web"), url
+        probe = "https://" + url
+        if _is_video_url(probe):
+            return "url", probe
     # 路径样（盘符开头 / 含反斜杠或多级分隔+文档扩展名）但文件不存在 → 显式报错，
     # 绝不拿路径文本去 B站名称搜索
     if re.match(r"^[A-Za-z]:[\\/]", path_like) or (
