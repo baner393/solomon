@@ -103,6 +103,84 @@ def read_page_content(path, tag="main"):
     return text[:3000]  # 每页最多 3000 字
 
 
+# ================= 图文回答（命中页面配图 → LLM 引用 → 渠道 MEDIA: 发图） =================
+# 入库侧 --images 已把识图说明写进页面（图前文后：embed 行 + 紧跟的教学说明行）；
+# 查询侧把「图 + 已有说明」带给 LLM，LLM 按需在解释段引用（MEDIA:<路径> 独立行），
+# hermes 发送管道把 MEDIA: 解析成渠道原生附件（QQ/微信/飞书均支持）——不重新识图。
+_IMG_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+_EMBED_RE = re.compile(r"!\[\[([^\]|]+?\.(?:jpg|jpeg|png|gif|webp))(?:\|[^\]]*)?\]\]", re.I)
+
+
+def _vault_image_index():
+    """vault 图片 basename(小写) → 绝对路径 索引（raw/assets 与 assets 两大来源）。"""
+    idx = {}
+    for sub in ("raw/assets", "assets"):
+        root = os.path.join(VAULT, sub)
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for f in files:
+                if f.lower().endswith(_IMG_EXTS):
+                    idx.setdefault(f.lower(), os.path.join(dirpath, f))
+    return idx
+
+
+def _locate_image(name, idx):
+    """页面 embed 图名 → vault 实际路径。兼容带路径 embed 与冒号↔横杠变体
+    （笔记引用冒号原名 / wiki 侧横杠名是既有惯例）。"""
+    base = name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    for cand in (base, base.replace(":", "-"), base.replace("-", ":")):
+        hit = idx.get(cand.lower())
+        if hit:
+            return hit
+    return None
+
+
+def _collect_page_images(hits, max_images=12):
+    """命中页面的可用配图清单 [(vault_abs_path, source_title, caption)]。
+
+    说明（caption）取 embed 行后第一条非空非 embed 文本（「图前文后」渲染规范：
+    教学说明紧跟图片下一行）。定位失败的图静默跳过（临时区图不在主库索引）。"""
+    idx = _vault_image_index()
+    out, seen = [], set()
+    for path, cat, title, snippet, rank, tag in hits:
+        body = read_page_content(path, tag)
+        lines = body.splitlines()
+        for i, line in enumerate(lines):
+            m = _EMBED_RE.search(line)
+            if not m:
+                continue
+            ap = _locate_image(m.group(1), idx)
+            if not ap or ap in seen:
+                continue
+            caption = ""
+            for nxt in lines[i + 1:i + 4]:
+                nxt = nxt.strip()
+                if nxt and not _EMBED_RE.search(nxt):
+                    caption = nxt[:80]
+                    break
+            seen.add(ap)
+            out.append((ap, title, caption))
+            if len(out) >= max_images:
+                return out
+    return out
+
+
+def _sanitize_media_lines(answer, images):
+    """剔除不在配图白名单里的 MEDIA: 行（防 LLM 幻觉路径）；合法引用保留。"""
+    if "MEDIA:" not in answer:
+        return answer
+    allow = {ap for ap, *_ in images}
+    kept = []
+    for line in answer.splitlines():
+        if line.strip().startswith("MEDIA:"):
+            p = line.strip()[6:].strip()
+            if p not in allow or not os.path.exists(p):
+                continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 # ================= 查询语义缓存（重复问题秒回，KB 更新自动失效） =================
 # 缓存与 FTS 库同放 vault/.kb/（每 vault 独立，随 vault 走；兼容 SOLOMON_FTS_DB 旧环境）。
 _KB_DIR = os.environ.get("SOLOMON_FTS_DB", os.path.join(VAULT, ".kb"))
@@ -124,6 +202,9 @@ def _kb_fingerprint():
             parts.append(str(int(os.path.getmtime(p))))
         except OSError:
             parts.append("0")
+    # prompt/行为版本标记：回答规范变更时使旧缓存整体失效
+    # （2026-10-03 图文回答上线——旧缓存答案无 MEDIA: 引图，会残留 24h）
+    parts.append("v2-media")
     return ":".join(parts)
 
 
@@ -189,21 +270,40 @@ def answer_with_llm(question, hits):
         body = read_page_content(path, tag)
         ctx_parts.append(f"### {mark}[{cat}] {title}（{path}）\n{body}")
     context = "\n\n".join(ctx_parts)[:15000]
+    # 可用配图清单（命中页面里的真实图片 + 入库时写好的教学说明）
+    images = _collect_page_images(hits)
+    media_block = ""
+    if images:
+        lines = ["可用配图（vault 实际文件；引图时单独一行输出 MEDIA:<完整路径>）："]
+        for ap, src_title, cap in images:
+            lines.append(f"- MEDIA:{ap}（来自[[{src_title}]]）" + (f" 图意：{cap}" if cap else ""))
+        media_block = "\n".join(lines)
     system = (
         "你是 Solomon 知识库问答管家。根据提供的知识库页面内容回答用户问题。\n"
         "回答结构固定为三段：\n"
         "**结论**：直接回答\n"
         "**依据**：列出引用的页面（用 [[页面名]] 格式）和相关内容\n"
         "**延伸**：相关知识关联、未覆盖的方向\n"
-        "如果检索内容不足以回答，明确说'知识库中没有直接答案'，并列出最接近的相关页面。"
+        "如果检索内容不足以回答，明确说'知识库中没有直接答案'，并列出最接近的相关页面。\n"
+        + (
+            "图文规范：\n"
+            "- 按需引图：当某张图能直观辅助解释（操作演示/界面截图/结构图/对比）时才引，"
+            "纯概念叙述不要硬塞图；\n"
+            "- 引图格式：在该段解释后单独一行输出 MEDIA:<完整路径>，图前用一句话说明"
+            "这张图展示了什么；一段文字配一张图，图文交替；\n"
+            "- 只准引用「可用配图」清单里的路径，清单里没有相关图就纯文字回答。\n"
+            if images else ""
+        )
     )
     user = (
         f"问题：{question}\n\n"
         f"知识库相关页面（FTS5 检索 top-{len(hits)}）：\n{context}\n\n"
-        "请按 结论/依据/延伸 三部分回答。"
+        + (f"{media_block}\n\n" if media_block else "")
+        + "请按 结论/依据/延伸 三部分回答。"
     )
     try:
         answer = llm_chat(system, user, temperature=0.2, stream=True)
+        answer = _sanitize_media_lines(answer, images)
         _cache_put(question, answer)
         return answer
     except Exception as e:
