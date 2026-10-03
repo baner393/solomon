@@ -238,8 +238,15 @@ def locate_missing_file(path):
     base = os.path.basename(path.replace("\\", "/"))
     if not base or len(base) < 4 or not re.search(r"\.(md|txt|docx?|pptx?|pdf|epub|xlsx?)$", base, re.I):
         return []
+    # 搜索根：SOLOMON_LOCATE_ROOTS env（冒号分隔）优先；默认用户家目录（开源版无个人痕迹，
+    # 生产 3 个 profile 的 .env 注入实际根列表）
+    roots_env = os.environ.get("SOLOMON_LOCATE_ROOTS", "").strip()
+    if roots_env:
+        roots = [(r, 5) for r in roots_env.split(":") if r.strip()]
+    else:
+        roots = [(os.path.expanduser("~"), 5)]
     hits = []
-    for root, depth in (("/home/baner", 5), ("/mnt/d", 4), ("/mnt/c/Users", 4)):
+    for root, depth in roots:
         if not os.path.isdir(root):
             continue
         try:

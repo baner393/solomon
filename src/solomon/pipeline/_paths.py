@@ -40,7 +40,7 @@ def default_temp_root() -> str:
     """临时学习区根（--peek 临时读取产物）：优先 SOLOMON_TEMP env。
 
     临时区与正式产物区（WORK_ROOT）平级独立：WORK_ROOT 的父目录/TempNotes
-    （如 WORK_ROOT=/mnt/d/ObsidianSpace/VideoNotes → /mnt/d/ObsidianSpace/TempNotes），
+    （如 WORK_ROOT=/mnt/d/VideoNotes → /mnt/d/TempNotes），
     便于统一管理与清理；缺省空串（调用处判断）。
     """
     v = os.environ.get("SOLOMON_TEMP", "")
