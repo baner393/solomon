@@ -276,6 +276,10 @@ def main(argv=None):
         print(f"\n===== 目标: {t} =====")
         if not delete_page(t, dry_run=args.dry_run):
             all_ok = False
+    if all_ok and not args.dry_run:
+        # 删除完成 → vault 自动推送（fire-and-forget，非 dry-run 才推）
+        from vault_git_sync import spawn_async
+        spawn_async()
     return 0 if all_ok else 1
 
 

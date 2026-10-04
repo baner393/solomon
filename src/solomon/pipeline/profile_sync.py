@@ -174,6 +174,9 @@ def sync(verbose: bool = True) -> int:
     with open(ARCHIVE_PATH, "w", encoding="utf-8") as f:
         f.write(existing)
     _log(f"✅ 档案更新: {ARCHIVE_REL}（+{len(new_items)} 条）")
+    # 档案变更 → vault 自动推送（fire-and-forget）
+    from vault_git_sync import spawn_async
+    spawn_async()
     return len(new_items)
 
 
@@ -218,6 +221,9 @@ def add(text: str) -> int:
         with open(p, "a", encoding="utf-8") as f:
             f.write(f"\n§\n{text}\n")
         _log(f"  ↪ 回写 {profile}/USER.md")
+    # 档案变更 → vault 自动推送（fire-and-forget）
+    from vault_git_sync import spawn_async
+    spawn_async()
     return 1
 
 

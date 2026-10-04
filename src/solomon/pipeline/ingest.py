@@ -2786,6 +2786,10 @@ def _auto_profile_sync():
 if __name__ == "__main__":
     try:
         main()
+        # 入库成功 → vault 自动推送（fire-and-forget 后台，不阻塞不外抛；
+        # vault 非 git 仓库/无 origin 时 vault_git_sync 内部静默跳过）
+        from vault_git_sync import spawn_async
+        spawn_async()
     except SystemExit:
         raise
     except KeyboardInterrupt:
