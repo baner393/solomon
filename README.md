@@ -17,6 +17,11 @@ solomon ask "RAG 是什么"         # 知识库问答
 
 ## 快速开始
 
+**完整系统部署**（hermes 网关 + 多 agent + 渠道路由 + 学习路线）：见 [DEPLOY.md](DEPLOY.md)，
+或把 [docs/DEPLOY-WITH-AGENT.md](docs/DEPLOY-WITH-AGENT.md) 喂给任意 coding agent 全自动部署。
+
+仅装管线本体（ingest/ask CLI）：
+
 ```bash
 # 1. 安装
 pip install -e .          # 或 uv sync（推荐）
