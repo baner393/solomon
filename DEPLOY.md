@@ -112,9 +112,30 @@ curl http://127.0.0.1:3456/health    # 验证
 ### 4.5 转写模型（视频入库需要）
 
 ```bash
-mkdir -p ~/models
-# sherpa-onnx SenseVoice（int8，~250MB，中文 SOTA）
-# 下载地址见 solomon 仓库 docs/troubleshooting.md「模型位置」节
+mkdir -p ~/models && cd ~/models
+# sherpa-onnx SenseVoice int8（~250MB，中文 SOTA，CPU 高效无 torch）
+curl -L -o sv.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2
+tar xzf sv.tar.bz2 && mv sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17 sherpa-onnx-sense-voice
+```
+
+> **没有这个模型也能用**：B 站视频大多有 AI 字幕（直接抓取，不需要本地转写）。
+> 只有「无 CC 且无 ASR 字幕」的视频才回落本地转写——届时装上模型即可，管线自动探测。
+
+### 4.6 网关常驻（systemd user service）
+
+```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/hermes-gateway.service <<UNIT
+[Unit]
+Description=Solomon coordinator gateway
+[Service]
+ExecStart=%h/.local/bin/hermes --profile coordinator gateway run
+Restart=always
+[Install]
+WantedBy=default.target
+UNIT
+systemctl --user daemon-reload && systemctl --user enable --now hermes-gateway
+journalctl --user -u hermes-gateway -f    # 看渠道连接日志
 ```
 
 ## 5. 配置详解
@@ -138,6 +159,17 @@ mkdir -p ~/models
 
 凭据自行申请：QQ 机器人（q.qq.com 开放平台）、飞书自建应用（open.feishu.cn，需开机器人能力+事件订阅）。
 填入 `.env` → `gateway.platforms.<渠道>.enabled: true` → 重启网关。接手者的渠道凭据与部署者无关，配自己的即可。
+
+**QQ 机器人**（官方 API，WebSocket 接入，无需公网）：
+1. [q.qq.com](https://q.qq.com) 注册开发者 → 创建机器人 → 拿 `AppID`/`AppSecret`（.env 的 `QQ_APP_ID`/`QQ_CLIENT_SECRET`）
+2. **沙箱环境先测**：平台「沙箱配置」里把你的 QQ 号加为沙箱成员（正式上线需审核）
+3. 消息权限：平台「机器人功能」里开通「C2C 单聊/群聊」消息能力
+4. .env 填好 → `gateway.platforms.qqbot.enabled: true` → 重启网关 → 沙箱群里发 `@help`
+
+**飞书**（WSS 长连接，无需公网服务器）：
+1. [open.feishu.cn](https://open.feishu.cn) 创建企业自建应用 → 凭据页拿 `App ID`/`App Secret`
+2. 权限：开「接收群聊@机器人消息」「读取用户发给机器人的单聊消息」；事件订阅选「**使用长连接接收事件**」（免公网回调）
+3. .env 填 `FEISHU_APP_ID/APP_SECRET` → `gateway.platforms.feishu.enabled: true` → 重启 → 私聊或群里 @ 发 `@help`
 
 ## 7. 启动与验证
 
