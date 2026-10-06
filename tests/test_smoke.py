@@ -330,6 +330,54 @@ class TestConfigUi:
         config_ui.update_env(p, {"SOLOMON_VAULT": ""})
         assert "SOLOMON_VAULT" not in p.read_text(encoding="utf-8")
 
+    def _fake_hermes(self, tmp_path):
+        """造 fake HERMES_HOME：三个 profile 各一个「本地代理形态」config.yaml。"""
+        for profile in ("coordinator", "solomon", "newsolomon"):
+            d = tmp_path / "hermes" / "profiles" / profile
+            d.mkdir(parents=True)
+            (d / "config.yaml").write_text(
+                f"""model:
+  provider: custom:sensenova-4key-3458
+  model: sensenova-6.8-flash-lite
+providers:
+  sensenova-4key-3456:
+    base_url: http://127.0.0.1:3456/v1
+    api_key: proxy
+  sensenova-4key-3458:
+    base_url: http://127.0.0.1:3458/v1
+    api_key: proxy
+""", encoding="utf-8")
+        return tmp_path / "hermes"
+
+    def test_llm_unified_cloud(self, tmp_path, monkeypatch):
+        """填云端端点 → 三个 config.yaml 的 base_url/api_key 统一走云端 + 首次备份。"""
+        sys.path.insert(0, str(SRC / "solomon"))
+        from solomon import config_ui
+        monkeypatch.setenv("HERMES_HOME", str(self._fake_hermes(tmp_path)))
+        reports = config_ui.apply_llm_unified("https://token.sensenova.cn/v1", "sk-test")
+        assert len(reports) == 3
+        for profile in ("coordinator", "solomon", "newsolomon"):
+            text = (tmp_path / "hermes" / "profiles" / profile / "config.yaml").read_text(encoding="utf-8")
+            assert "127.0.0.1:345" not in text
+            assert "base_url: https://token.sensenova.cn/v1" in text
+            assert "api_key: sk-test" in text
+        # 备份存在（可还原）
+        assert (tmp_path / "hermes" / ".config-ui" / "backup" / "solomon.config.yaml").exists()
+
+    def test_llm_unified_local_restore(self, tmp_path, monkeypatch):
+        """清空端点 → 从备份还原本地代理（测试完切回的对称操作）。"""
+        sys.path.insert(0, str(SRC / "solomon"))
+        from solomon import config_ui
+        monkeypatch.setenv("HERMES_HOME", str(self._fake_hermes(tmp_path)))
+        config_ui.apply_llm_unified("https://token.sensenova.cn/v1", "sk-test")
+        config_ui.apply_llm_unified("", "")
+        for profile in ("coordinator", "solomon", "newsolomon"):
+            text = (tmp_path / "hermes" / "profiles" / profile / "config.yaml").read_text(encoding="utf-8")
+            assert "base_url: http://127.0.0.1:3456/v1" in text
+            assert "base_url: http://127.0.0.1:3458/v1" in text
+            assert "api_key: proxy" in text
+        assert not (tmp_path / "hermes" / ".config-ui" / "backup" / "solomon.config.yaml").exists()
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

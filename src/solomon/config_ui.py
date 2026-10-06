@@ -153,6 +153,66 @@ def target_env_files() -> list[tuple[str, Path]]:
     return targets
 
 
+def hermes_home_dir() -> Path:
+    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+
+
+# ── LLM 配置统一（.env 管线层 + config.yaml agent 层）──────────
+# 2026-10-06 全量测试暴露：GUI 只写 .env，hermes agent 的模型调用读 config.yaml
+# providers（默认指向本机 3456/3458 代理）——朋友部署无本地代理时 @问答必然失败。
+# 规则：填了云端 LLM_BASE_URL → 两层统一走云端；清空 → 恢复本机代理（整文件快照还原）。
+
+def _config_yaml_files() -> list[tuple[str, Path]]:
+    out = []
+    for profile in ("coordinator", "solomon", "newsolomon"):
+        p = hermes_home_dir() / "profiles" / profile / "config.yaml"
+        if p.exists():
+            out.append((profile, p))
+    return out
+
+
+def _cloud_backup_dir() -> Path:
+    d = hermes_home_dir() / ".config-ui" / "backup"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def apply_llm_unified(cloud_base: str, cloud_key: str) -> list[str]:
+    """统一 LLM 配置到 config.yaml（agent 层）。
+
+    cloud_base 非空：三层全走云端——先备份本地形态 config.yaml（首次），再文本替换
+    base_url(127.0.0.1:3456/3458→云端) + api_key(proxy→key)。
+    cloud_base 为空：从备份还原本地代理形态（测试完切回的对称操作）。
+    返回每 profile 的动作描述。
+    """
+    cloud_base = (cloud_base or "").strip().rstrip("/")
+    reports = []
+    for profile, p in _config_yaml_files():
+        text = p.read_text(encoding="utf-8", errors="replace")
+        backup = _cloud_backup_dir() / f"{profile}.config.yaml"
+        if cloud_base:
+            if not backup.exists() and "127.0.0.1:345" in text:
+                backup.write_text(text, encoding="utf-8")  # 首次切云端前备份
+            new = re.sub(r"base_url:\s*http://127\.0\.0\.1:345[68]/v1\b",
+                         f"base_url: {cloud_base}/v1" if not cloud_base.endswith("/v1") else f"base_url: {cloud_base}",
+                         text)
+            if cloud_key:
+                new = re.sub(r"api_key:\s*\S+", f"api_key: {cloud_key}", new)
+            if new != text:
+                p.write_text(new, encoding="utf-8")
+                reports.append(f"{profile}: config.yaml → 云端（{cloud_base}）")
+            else:
+                reports.append(f"{profile}: config.yaml 已是云端形态，未变更")
+        else:
+            if backup.exists():
+                p.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
+                backup.unlink()
+                reports.append(f"{profile}: config.yaml → 恢复本地代理（快照还原）")
+            else:
+                reports.append(f"{profile}: 无本地快照，config.yaml 未动")
+    return reports
+
+
 # ── Web 服务 ──────────────────────────────────────────────────
 _HTML = """<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8">
@@ -183,7 +243,8 @@ details{margin-top:6px}details summary{cursor:pointer;font-size:13px;color:#5760
 <label>端点地址 LLM_BASE_URL <input type="text" id="LLM_BASE_URL" placeholder="https://token.sensenova.cn/v1（不填则用默认本地代理）"></label>
 <label>API Key <input type="password" id="LLM_API_KEY" placeholder="你的密钥"></label>
 <label>模型名（可选）<input type="text" id="SENSENOVA_MODEL" placeholder="sensenova-6.8-flash-lite"></label>
-<div class="hint">不填端点=连本地轮换代理 127.0.0.1:3456（自建代理用户）。</div></section>
+<div class="hint">不填端点=连本地轮换代理 127.0.0.1:3456（自建代理用户）。<br>
+<b>填写云端端点后，问答/入库/agent 思考层会统一走云端</b>（改动 agent 层 config.yaml，需重启网关生效）。</div></section>
 
 <section><h2>② 知识库位置（必填）</h2>
 <p class="hint" style="margin-top:0">支持三种存放：<b>本地 Windows 盘</b> / <b>WSL 文件系统</b> / <b>云服务器</b>。选「我运行在」后输入路径，下方自动给出转换建议。</p>
@@ -302,9 +363,16 @@ class _Handler(BaseHTTPRequestHandler):
             written_total = 0
             for _, p in targets:
                 written_total += update_env(p, fields)
+            # LLM 配置统一：填云端端点 → agent 层 config.yaml 同步云端；清空 → 恢复本地代理
+            yaml_reports = apply_llm_unified(fields.get("LLM_BASE_URL", ""), fields.get("LLM_API_KEY", ""))
+            msg = f"已保存到 {len(targets)} 个配置文件（更新 {written_total} 个键）"
+            if yaml_reports:
+                msg += "；" + "；".join(yaml_reports)
+            if fields.get("LLM_BASE_URL"):
+                msg += "。⚠️ 改了 agent 层 config.yaml，需重启网关才生效（hermes --profile coordinator gateway restart）"
             return self._json({
                 "ok": True,
-                "message": f"已保存到 {len(targets)} 个配置文件（更新 {written_total} 个键）",
+                "message": msg,
             })
         return self._json({"error": "not found"}, 404)
 
