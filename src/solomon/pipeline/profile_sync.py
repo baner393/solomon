@@ -253,7 +253,9 @@ def main(argv=None):
     rc = args.fn(args)
     # 档案变更后统一走标准入库善后（index/log/FTS/verify），幂等
     _postprocess_archive()
-    return rc
+    # fn 返回值是「新增条数」业务值，不是退出码：非负=成功 0，负（如 -1 空内容）=失败 1
+    # （2026-10-06 全量测试：原 return rc 使成功的 add 恒 exit 1）
+    return 0 if rc >= 0 else 1
 
 
 if __name__ == "__main__":

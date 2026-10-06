@@ -225,12 +225,14 @@ def _save_cache(cache):
         pass
 
 
-def _cache_get(question):
-    """查缓存：命中且未过期且 KB 指纹一致 → 返回答案；否则 None。"""
+def _cache_get(question, scope="all"):
+    """查缓存：命中且未过期且 KB 指纹一致 → 返回答案；否则 None。
+
+    key 含 scope（2026-10-06 全量测试：同问题 --scope tmp/all 曾串用同一缓存正文）。"""
     cache = _load_cache()
     if cache.get("fingerprint") != _kb_fingerprint():
         return None  # KB 已更新，缓存整体失效
-    entry = cache.get("entries", {}).get(question.strip().lower())
+    entry = cache.get("entries", {}).get(f"{scope}:{question.strip().lower()}")
     if not entry:
         return None
     if time.time() - entry.get("ts", 0) > CACHE_TTL:
@@ -238,17 +240,17 @@ def _cache_get(question):
     return entry.get("answer")
 
 
-def _cache_put(question, answer):
+def _cache_put(question, answer, scope="all"):
     """写入缓存（KB 指纹变了会重建）。"""
     cache = _load_cache()
     fp = _kb_fingerprint()
     if cache.get("fingerprint") != fp:
         cache = {"fingerprint": fp, "entries": {}}
-    cache["entries"][question.strip().lower()] = {"answer": answer, "ts": time.time()}
+    cache["entries"][f"{scope}:{question.strip().lower()}"] = {"answer": answer, "ts": time.time()}
     _save_cache(cache)
 
 
-def answer_with_llm(question, hits):
+def answer_with_llm(question, hits, scope="all"):
     """LLM 综合回答：结论 → 依据 → 延伸（流式输出到 stdout）。
 
     成功时答案已逐 token 流式打印，返回完整文本（调用方不再重复打印）；
@@ -257,7 +259,7 @@ def answer_with_llm(question, hits):
     if not hits:
         return None
     # ① 语义缓存：命中直接返回（KB 未变 + 未过期），跳过 LLM
-    cached = _cache_get(question)
+    cached = _cache_get(question, scope)
     if cached is not None:
         print(cached)
         print()  # 空行，与「来源页」隔开
@@ -304,7 +306,7 @@ def answer_with_llm(question, hits):
     try:
         answer = llm_chat(system, user, temperature=0.2, stream=True)
         answer = _sanitize_media_lines(answer, images)
-        _cache_put(question, answer)
+        _cache_put(question, answer, scope)
         return answer
     except Exception as e:
         lines = [f"（LLM 调用失败: {e}）", ""]
@@ -366,7 +368,7 @@ def main():
         return
 
     if hits:
-        answer = answer_with_llm(question, hits)
+        answer = answer_with_llm(question, hits, scope=args.scope)
         # 成功时答案已流式打印到 stdout；只有失败串（以「（LLM 调用失败」开头）才需补打印
         if answer and answer.startswith("（LLM 调用失败"):
             print(answer)
