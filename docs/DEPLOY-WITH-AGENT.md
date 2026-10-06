@@ -24,7 +24,9 @@
 
 ```bash
 uname -r                        # 确认 WSL2(*microsoft*) 或 Linux
-command -v python3.14 git curl ffmpeg node pipx   # 全部存在？缺什么列什么
+command -v python3.13 git curl ffmpeg node pipx   # 全部存在？缺什么列什么
+# ⚠️ Python 必须 3.11~3.13（hermes 锁版 v2026.9.7 声明 requires-python ">=3.11,<3.14"，
+# 3.14 会被 pip 硬拒；solomon 管线兼容 >=3.11）。推荐 3.13。
 systemctl --user is-system-running 2>/dev/null      # systemd user 可用？
 ```
 
@@ -34,8 +36,8 @@ systemctl --user is-system-running 2>/dev/null      # systemd user 可用？
   详细步骤见 `DEPLOY.md §0`）；若任务明确只要核心 CLI（无机器人），改按 `README.md`「快速开始」执行。
 
 缺依赖 → 安装（Ubuntu: `apt install git curl ffmpeg pipx; pipx ensurepath`；
-python3.14 用 deadsnakes PPA 或 `uv python install 3.14` 后建软链）。
-**验收**：平台为 WSL2/Linux；全部命令存在且版本合理。
+python3.13 用 deadsnakes PPA 或 `uv python install 3.13` 后建软链）。
+**验收**：平台为 WSL2/Linux；python3.13 存在且 `python3.13 --version` 正常；全部命令存在且版本合理。
 
 ## 阶段 1：solomon 仓库
 
@@ -53,7 +55,7 @@ cd ~/.local/src/hermes-agent
 git fetch --tags origin main && git checkout tags/v2026.9.7
 git apply --check ~/solomon/patches/gateway-route-patch.diff   # 必须零报错
 git apply ~/solomon/patches/gateway-route-patch.diff
-pipx install --python python3.14 -e ~/.local/src/hermes-agent
+pipx install --python python3.13 -e ~/.local/src/hermes-agent   # hermes 锁版 requires-python <3.14，3.14 会被 pip 硬拒
 ```
 **验收**：`hermes --version` 输出版本；`git apply --check` 无冲突。
 （冲突=仓库不干净，`git status` 查明后 `git checkout -- .` 重来。）
@@ -61,7 +63,7 @@ pipx install --python python3.14 -e ~/.local/src/hermes-agent
 ## 阶段 3：solomon CLI
 
 ```bash
-pip3.14 install -e ~/solomon
+python3.13 -m pip install -e ~/solomon（若报 externally-managed 用 venv：python3.13 -m venv .venv && source .venv/bin/activate 后 pip install -e .）
 solomon --help   # 出现 ingest/ask/doctor/init/verify/index 子命令
 ```
 **验收**：`solomon doctor` 能跑（此刻 vault 未配会报「vault 不存在」，属预期，记录即可）。
@@ -97,8 +99,15 @@ done
 ```bash
 export SOLOMON_VAULT=~/solomon-vault
 solomon init
+# vault 建 git 基线（自动备份/推送的前置；solomon init 不自动建仓）
+cd ~/solomon-vault
+git init && git config user.name "solomon" && git config user.email "solomon@hermes.local"
+git add -A && git commit -m "vault 同步基线"
 ```
 **验收**：vault 目录出现 `concepts/ raw/ index.md` 等结构；`git -C ~/solomon-vault log` 有基线提交。
+**持久化**：把 `SOLOMON_VAULT=~/solomon-vault`（和你配的 LLM 端点）写进三个 profile 的
+`.env`（`~/.hermes/profiles/{coordinator,solomon,newsolomon}/.env`）——后续阶段 7 与
+网关问答都依赖 .env 里的持久值，不要只用临时 export。
 
 ## 阶段 7：端到端验证（验收清单）
 
@@ -106,7 +115,7 @@ solomon init
 2. `hermes --profile solomon chat -Q -q "你是谁"` 返回带「喵」的回答（LLM 链路通）
 3. `solomon ingest "https://www.bilibili.com/video/BV1C69iBgEMk"` 完整入库
    （EXIT=0；vault 出现 concepts/五层页 + raw/转写 + index.md 条目）
-4. `SOLOMON_VAULT=~/solomon-vault python3.14 ~/solomon/src/solomon/query/query_kb.py "RAG的基本原理"` 命中刚入库内容
+4. `SOLOMON_VAULT=~/solomon-vault python3.13 ~/solomon/src/solomon/query/query_kb.py "RAG的基本原理"（或 solomon ask "RAG 是什么"）` 命中刚入库内容
 5. `hermes --profile coordinator gateway run`（后台）→ 向渠道发 `@help` 收到命令清单（有渠道凭据时）；
    无渠道则用 `hermes --profile solomon chat -Q -q "..."` 替代验证路由链路
 6. （可选）vault 加 GitHub 私有 remote → 手动触发一次推送成功

@@ -49,8 +49,8 @@ pipx ensurepath && source ~/.bashrc
 Python 3.14（管线生产验证版本；≥3.10 亦可跑）：
 
 ```bash
-sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt install -y python3.14 python3.14-venv
-# 或用 uv：curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.14
+sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt install -y python3.13 python3.13-venv
+# 或用 uv：curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.13
 ```
 
 > 💡 **PEP 668 提醒（Ubuntu 23.04+）**：直接 `pip install` 会报 `externally-managed-environment`。
@@ -112,7 +112,7 @@ sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt install -y python3.14 
 ## 2. 前置要求
 
 - **WSL2 (Ubuntu 22.04+) 或 Linux + systemd**
-- `python3.14`（管线锁定版本；Ubuntu 用 deadsnakes PPA 或 `uv python install 3.14`）
+- **Python 3.13**（推荐，一套通吃：hermes 锁版 v2026.9.7 声明 `requires-python >=3.11,<3.14`——**3.14 装 hermes 会被 pip 硬拒**；solomon 管线兼容 >=3.11。Ubuntu 用 deadsnakes PPA 或 `uv python install 3.13`）
 - `pipx`、`git`、`curl`、`ffmpeg`、`node`（≥18）
 - LLM：SenseNova API Key（[申请](https://console.sensecore.cn)）或任意 OpenAI 兼容端点
 - 可选：7890 HTTP 代理（视频下载/YouTube）、QQ 机器人/飞书应用凭据
@@ -135,8 +135,8 @@ bash install.sh          # 交互式；SKIP_INTERACTIVE=1 bash install.sh 全默
 git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git ~/.local/src/hermes-agent
 cd ~/.local/src/hermes-agent
 git fetch --tags origin main && git checkout tags/v2026.9.7
-git apply ~/solomon/patches/gateway-route-patch.diff   # 979 行，4 文件，零冲突（对 v2026.9.7）
-pipx install --python python3.14 -e ~/.local/src/hermes-agent
+git apply ~/solomon/patches/gateway-route-patch.diff   # 979 行，3 文件，零冲突（对 v2026.9.7）
+pipx install --python python3.13 -e ~/.local/src/hermes-agent   # hermes 必须 <3.14
 ```
 
 > **为什么锁 v2026.9.7**：补丁基于该版本源码（上游更新极快，v0.21.5 起架构大改）。

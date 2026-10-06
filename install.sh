@@ -34,9 +34,15 @@ if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == CYGWIN* || "$(uname -s)" == Da
 fi
 [[ "$(uname -r)" == *microsoft* || -d /run/systemd/system ]] || die "需要 WSL2(Ubuntu, systemd) 或 Linux"
 for cmd in git curl ffmpeg node;  do command -v $cmd >/dev/null || die "缺 $cmd（apt install $cmd）"; done
-command -v python3.14 >/dev/null || die "缺 python3.14（Ubuntu: deadsnakes PPA / 或用 uv python install 3.14）"
+# Python 版本：推荐 3.13 一套通吃——hermes-agent 锁版 v2026.9.7 声明 requires-python
+# ">=3.11,<3.14"（3.14 会被 pip 硬拒）；solomon 管线兼容 >=3.11。
+PY388=""
+for cand in python3.13 python3.12 python3.11; do
+  command -v $cand >/dev/null && { PY388=$cand; break; }
+done
+[[ -n $PY388 ]] || die "缺 python3.13（推荐；hermes 锁版要求 >=3.11,<3.14，solomon 兼容 >=3.11。Ubuntu: deadsnakes PPA / uv python install 3.13）"
 command -v pipx >/dev/null || pipx --version >/dev/null 2>&1 || die "缺 pipx（apt install pipx）"
-ok "基础依赖齐备"
+ok "基础依赖齐备（python=$PY388）"
 
 say "② 克隆 solomon → $REPO_DIR"
 [[ -d $REPO_DIR ]] || git clone https://github.com/baner393/solomon.git "$REPO_DIR"
@@ -53,14 +59,14 @@ git -C "$HERMES_SRC" checkout -q "tags/$HERMES_TAG"
 git -C "$HERMES_SRC" apply --check "$REPO_DIR/patches/gateway-route-patch.diff" \
   || die "补丁与 $HERMES_TAG 源码冲突——检查 hermes-agent 是否为干净 $HERMES_TAG"
 git -C "$HERMES_SRC" apply "$REPO_DIR/patches/gateway-route-patch.diff"
-ok "网关补丁已应用（route-robust 979 行，4 文件）"
+ok "网关补丁已应用（979 行，3 文件：qqbot/feishu adapter + run_inbound）"
 
 say "④ 安装 Python 包"
-pipx install --python python3.14 -e "$HERMES_SRC" 2>/dev/null \
-  || pipx upgrade --python python3.14 -e hermes-agent
+pipx install --python "$PY388" -e "$HERMES_SRC" 2>/dev/null \
+  || pipx upgrade --python "$PY388" -e hermes-agent
 export PATH="$HOME/.local/bin:$PATH"
 hermes --version || die "hermes 安装失败"
-pip3.14 install -e "$REPO_DIR" --quiet || pip3.14 install -e "$REPO_DIR"
+"$PY388" -m pip install -e "$REPO_DIR" --quiet 2>/dev/null || "$PY388" -m pip install -e "$REPO_DIR"
 solomon --help >/dev/null 2>&1 && ok "solomon CLI 就绪" || die "solomon CLI 安装失败"
 
 say "⑤ 生成 profiles（配置骨架，凭据后填）"

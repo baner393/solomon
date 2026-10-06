@@ -1,0 +1,28 @@
+# Solomon profile 配置模板（newsolomon 入库 agent）
+# 复制到 ~/.hermes/profiles/newsolomon/config.yaml
+# LLM 走本地 SenseNova 4Key 轮换代理（scripts/sensenova-proxy/），也可换成任意 OpenAI 兼容端点
+
+model:
+  provider: custom:sensenova-4key-3456      # 入库/识图走视觉+通用池（3456）
+  model: sensenova-6.8-flash-lite
+
+fallback_providers:
+- provider: custom:sensenova-4key-3458     # 备池（flash-lite 文本池顶上）
+  model: sensenova-6.8-flash-lite
+
+agent:
+  gateway_timeout: 1800                    # 入库任务回答超时（秒）
+  gateway_timeout_warning: 900
+  # 入库是确定性脚本管线（ingest.py），agent 只负责编排调用——关掉与脚本无关的重 toolset
+  disabled_toolsets: [session_search]
+
+# LLM 代理提供者定义（与 scripts/sensenova-proxy 启动的两个端口对应）
+providers:
+  sensenova-4key-3456:
+    base_url: http://127.0.0.1:3456/v1
+    api_key: proxy
+    env_key: SENSENOVA_API_KEY_3456
+  sensenova-4key-3458:
+    base_url: http://127.0.0.1:3458/v1
+    api_key: proxy
+    env_key: SENSENOVA_API_KEY_3458
