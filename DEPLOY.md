@@ -272,6 +272,21 @@ hermes --profile solomon chat -Q -q "刚入库的视频讲了什么"  # ⑤ 问�
 @@solomon                      # 本会话默认路由（免 @）
 ```
 
+## 8.5 @help 帮助路由（重要，先读）
+
+**每个部署都必须知道：`@help` 是系统的「使用入口」**——任何消息进网关先过
+**确定性路由链**（`help → confirm → 默认路由 → delete → remember → clean → ingest → peek → promote`），
+`@help` / `@newsolomon 帮助` / `@solomon 帮助` 排在**第一位**，不经过任何 LLM/agent，
+直接返回全量命令手册（实时同步网关实现）。
+
+- **用户不确定怎么用 → 先发 `@help`**：命令清单、可抄示例、两步确认格式、FAQ 全在里面
+- **新增能力必须同步 help**：本手册由网关路由源码维护（`gateway/run_inbound.py` 的 `_HELP_TEXT`），
+  改 help = 改源码 + 重生成补丁（`patches/gateway-route-patch.diff`，从基点 `2237be3` diff）+ 重启网关
+- **它拦截在 LLM 之前**：帮助请求不会丢给 agent 自由发挥（LLM 路由不可靠，九·一〇教训），
+  确定性返回才能保证「每次都是同一份准确手册」
+- 当前支持命令（完整清单以 `@help` 返回为准）：入库（视频/文件/网页/**飞书文档**/文本/名称）、
+  临时读取/转正/清理缓存、删除（两步确认）、记住（个人档案）、问答与 @@ 默认路由
+
 ## 9. 维护
 
 ### 内建定时任务（gateway cron，`hermes cron list`）

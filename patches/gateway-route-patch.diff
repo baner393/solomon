@@ -1,5 +1,5 @@
 diff --git a/gateway/platforms/qqbot/adapter.py b/gateway/platforms/qqbot/adapter.py
-index 379e6a8..4f75568 100644
+index 379e6a82c0..4f755684b5 100644
 --- a/gateway/platforms/qqbot/adapter.py
 +++ b/gateway/platforms/qqbot/adapter.py
 @@ -1347,13 +1347,32 @@ class QQAdapter(BasePlatformAdapter):
@@ -37,7 +37,7 @@ index 379e6a8..4f75568 100644
          last_result = SendResult(success=False, error="No chunks")
          for chunk in chunks:
 diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
-index 94a9c83..4635973 100644
+index 94a9c8346d..863ba06a22 100644
 --- a/gateway/run_inbound.py
 +++ b/gateway/run_inbound.py
 @@ -34,6 +34,32 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
@@ -73,7 +73,7 @@ index 94a9c83..4635973 100644
  
  class GatewayInboundMixin:
      """Inbound message pipeline (_handle_message, text/media preparation, durable-turn markers, plugin injection) for GatewayRunner."""
-@@ -1176,6 +1202,825 @@ class GatewayInboundMixin:
+@@ -1176,6 +1202,827 @@ class GatewayInboundMixin:
              logger.debug("FIFO orphan rescue pre-claim failed for %s", _quick_key, exc_info=True)
              return event, source, is_internal
  
@@ -369,7 +369,9 @@ index 94a9c83..4635973 100644
 +        "📦 入库\n"
 +        "▸ 发链接（最常用）：\n"
 +        "@newsolomon 入库 https://www.bilibili.com/video/BVxxxx\n"
-+        "▸ 发本地文件（md/pdf/docx/xlsx/html/epub）：\n"
++        "▸ 飞书文档（wiki/docx 链接，自动读正文）：\n"
++        "@newsolomon 入库 https://xxx.feishu.cn/wiki/xxxx\n"
++        "▸ 本地文件（md/pdf/docx/xlsx/html/epub）：\n"
 +        "@newsolomon 入库 D:\\资料\\面试笔记.md\n"
 +        "▸ 按标题搜视频 / 直接记录文字：\n"
 +        "@newsolomon 入库 --name 视频标题\n"
@@ -899,7 +901,7 @@ index 94a9c83..4635973 100644
      async def _handle_message(self, event: MessageEvent) -> Optional[str]:
          """Handle an incoming message from any platform: auth → command check → running-agent
          interrupt → get/create session → build context → run agent → return response."""
-@@ -1189,6 +2034,44 @@ class GatewayInboundMixin:
+@@ -1189,6 +2036,44 @@ class GatewayInboundMixin:
          if _paused_notice is not None:
              return _paused_notice
  
@@ -945,7 +947,7 @@ index 94a9c83..4635973 100644
          _reply = await self._hm_pending_reply_intercepts(event, source, _quick_key)
          if _reply is not None:
 diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
-index eb48876..e4c7722 100644
+index eb48876caf..e4c7722e0c 100644
 --- a/plugins/platforms/feishu/adapter.py
 +++ b/plugins/platforms/feishu/adapter.py
 @@ -1557,10 +1557,27 @@ class FeishuAdapter(BasePlatformAdapter):
