@@ -72,6 +72,7 @@ solomon ask "RAG 是什么"
 | 命令 | 说明 |
 |---|---|
 | `solomon init` | 初始化 vault 目录结构 |
+| `solomon config` | **图形配置向导**（浏览器界面）：LLM 端点/知识库存放位置（Windows/WSL/云）/渠道凭据/代理，一键写入 .env。`--host 0.0.0.0 --port 9000` 用于云服务器 |
 | `solomon doctor` | 环境自检（依赖 / LLM 端点 / vault 可写），给出修复建议 |
 | `solomon ingest <URL\|文件\|--name\|--text>` | 入库。`--images` 配图版；`--force` 全量重跑；`--max-parts N` 合集限前 N 集 |
 | `solomon ask "问题"` | 知识库问答（FTS5 检索 + LLM 综合回答）。`--raw` 只看检索结果 |

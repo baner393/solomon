@@ -338,7 +338,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_profile.add_argument("text", nargs="?", help="add 时的内容，如：我是XXX，在YYY工作")
     p_profile.set_defaults(fn=cmd_profile)
 
+    p_config = sub.add_parser("config", help="图形配置向导（浏览器界面：LLM/知识库位置/渠道/代理，小白友好）")
+    p_config.add_argument("--host", default="127.0.0.1", help="绑定地址（云服务器用 0.0.0.0）")
+    p_config.add_argument("--port", type=int, default=8811, help="端口（默认 8811）")
+    p_config.set_defaults(fn=lambda a: _cmd_config(a))
+
     return ap
+
+
+def _cmd_config(args) -> int:
+    """启动 Web 配置向导（config_ui.serve）。"""
+    from solomon import config_ui
+    config_ui.serve(args.host, args.port)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

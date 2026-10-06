@@ -288,5 +288,48 @@ class TestTranscribe:
         assert hasattr(tc, "main") or hasattr(tc, "transcribe")
 
 
+class TestConfigUi:
+    """图形配置向导的纯函数（路径转换 / .env 幂等写入）。"""
+
+    def _norm(self, path, platform):
+        sys.path.insert(0, str(SRC / "solomon"))
+        from solomon import config_ui
+        return config_ui.normalize_path(path, platform)["suggested"]
+
+    def test_wsl_normalize_win_drive(self):
+        assert self._norm("D:\\foo\\bar.md", "wsl") == "/mnt/d/foo/bar.md"
+        assert self._norm("D:/foo/bar.md", "wsl") == "/mnt/d/foo/bar.md"
+        assert self._norm("/mnt/d/x", "wsl") == "/mnt/d/x"
+
+    def test_windows_normalize_mnt(self):
+        assert self._norm("/mnt/d/x", "windows") == "D:/x"
+        assert self._norm("D:\\x", "windows") == "D:/x"
+
+    def test_unc_normalize(self):
+        assert self._norm("\\\\wsl.localhost\\Ubuntu\\home\\u\\vault", "wsl") == "/home/u/vault"
+
+    def test_linux_absolute(self):
+        assert self._norm("/data/vault", "linux") == "/data/vault"
+
+    def test_update_env_preserves_others(self, tmp_path):
+        sys.path.insert(0, str(SRC / "solomon"))
+        from solomon import config_ui
+        p = tmp_path / ".env"
+        p.write_text("# 注释行\nSOLOMON_VAULT=/old/vault\nKEEP_ME=yes\n", encoding="utf-8")
+        config_ui.update_env(p, {"SOLOMON_VAULT": "/new/vault", "LLM_API_KEY": "sk-x"})
+        text = p.read_text(encoding="utf-8")
+        assert "# 注释行" in text and "KEEP_ME=yes" in text
+        assert "/new/vault" in text and "/old/vault" not in text
+        assert "LLM_API_KEY=sk-x" in text
+
+    def test_update_env_empty_removes(self, tmp_path):
+        sys.path.insert(0, str(SRC / "solomon"))
+        from solomon import config_ui
+        p = tmp_path / ".env"
+        p.write_text("SOLOMON_VAULT=/old/vault\n", encoding="utf-8")
+        config_ui.update_env(p, {"SOLOMON_VAULT": ""})
+        assert "SOLOMON_VAULT" not in p.read_text(encoding="utf-8")
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

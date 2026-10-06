@@ -207,6 +207,12 @@ journalctl --user -u hermes-gateway -f    # 看渠道连接日志
 
 ## 5. 配置详解
 
+> 💻 **小白优先用图形向导**：`solomon config`（浏览器界面，纯 stdlib 零依赖）——
+> 自动检测运行环境（Windows/WSL/云），LLM 端点、知识库存放位置（支持 Windows 盘符 /
+> WSL 挂载 / 云服务器路径，自动做跨平台转换提示）、渠道凭据、代理，一键写入各 profile 的
+> `.env`（幂等：保留既有键，空值删除）。云服务器：`solomon config --host 0.0.0.0 --port 9000`。
+> 下面表格是向导背后的键名全集，供手动配置/排查用。
+
 每个 profile 的 `.env`（键名全集见 `profiles/env.example`）：
 
 | 键 | 说明 | 必填 |
