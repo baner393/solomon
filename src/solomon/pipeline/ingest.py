@@ -64,6 +64,7 @@ import llm_client  # noqa: E402  # preflight 引用 llm_client._endpoints()，�
 from llm_client import llm_json, llm_chat, vision_batch  # noqa: E402
 import postprocess  # noqa: E402
 from doc_convert import _to_markdown, _web_to_markdown, _download_web_images  # noqa: E402
+import feishu_doc  # noqa: E402  # 飞书文档读取（wiki/docx → markdown）
 
 # 出网代理（YouTube 等海外源；B站全程直连不受影响）。空串 = 直连。
 # 需要海外源时在 .env 配 HTTP_PROXY（如 http://127.0.0.1:7890）。
@@ -330,6 +331,8 @@ def classify_input(arg):
     else:
         path_like = arg
     if URL_RE.match(path_like):
+        if "feishu.cn" in path_like:
+            return "feishu", path_like  # 飞书文档走开放 API 读取（网页抓取会撞登录墙）
         return ("url" if _is_video_url(path_like) else "web"), path_like
     if LOCAL_FILE_RE.match(path_like) or _REL_DOC_RE.match(path_like):
         wsl = _to_wsl_path(path_like)
@@ -2794,6 +2797,22 @@ def main():
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(f"来源: {val}\n\n{content}")
         return ingest_document(tmp, title=args.title, category=args.category, web_url=val)
+    if kind == "feishu":
+        log(f"飞书文档读取: {val}")
+        try:
+            f_title, content = feishu_doc.fetch_doc(val)
+        except Exception as e:  # noqa: BLE001
+            log(f"❌ 飞书文档读取失败: {e}")
+            print(f"❌ 飞书文档读取失败: {e}（确认 FEISHU_APP_ID/SECRET 与应用已开 wiki/docx 权限）")
+            sys.exit(1)
+        if not content.strip():
+            log("❌ 飞书文档为空或全部块无法渲染")
+            sys.exit(1)
+        tmp = os.path.join("/tmp", f"ingest_feishu_{int(time.time())}.md")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(f"来源: {val}\n\n{content}")
+        return ingest_document(
+            tmp, title=args.title or f_title, category=args.category, web_url=val)
     if kind == "file":
         return ingest_document(val, title=args.title, category=args.category)
     if kind == "file_missing":

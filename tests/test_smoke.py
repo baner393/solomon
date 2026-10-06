@@ -379,5 +379,40 @@ providers:
         assert not (tmp_path / "hermes" / ".config-ui" / "backup" / "solomon.config.yaml").exists()
 
 
+class TestFeishuDoc:
+    """飞书文档读取（无网络：classify 识别 + 内容键驱动渲染 + ordered 编号）。"""
+
+    def test_classify_feishu_url(self):
+        sys.path.insert(0, str(SRC / "solomon" / "pipeline"))
+        import ingest
+        kind, val = ingest.classify_input("https://mcnurwzg3ql6.feishu.cn/wiki/ZxJrwPJUGikjNDkrPyncy9f9nrP")
+        assert kind == "feishu"
+        assert "feishu.cn" in val
+
+    def test_render_blocks_content_keys(self):
+        sys.path.insert(0, str(SRC / "solomon" / "pipeline"))
+        import feishu_doc
+        blocks = [
+            {"block_id": "b1", "block_type": 1, "children": ["b2", "b3", "b4", "b5"]},
+            {"block_id": "b2", "block_type": 3, "heading1": {"elements": [{"text_run": {"content": "标题一"}}]}},
+            {"block_id": "b3", "block_type": 2, "text": {"elements": [{"text_run": {"content": "正文段落"}}]}},
+            {"block_id": "b4", "block_type": 13, "ordered": {"elements": [{"text_run": {"content": "步骤A"}}]}},
+            {"block_id": "b5", "block_type": 13, "ordered": {"elements": [{"text_run": {"content": "步骤B"}}]}},
+        ]
+        md = feishu_doc.render_blocks(blocks)
+        assert "# 标题一" in md
+        assert "正文段落" in md
+        assert "1. 步骤A" in md
+        assert "2. 步骤B" in md
+
+    def test_render_image_placeholder(self):
+        sys.path.insert(0, str(SRC / "solomon" / "pipeline"))
+        import feishu_doc
+        blocks = [{"block_id": "b1", "block_type": 1, "children": ["b2"]},
+                  {"block_id": "b2", "block_type": 27, "image": {"token": "TOK123", "width": 100, "height": 100}}]
+        md = feishu_doc.render_blocks(blocks)
+        assert "TOK123" in md and "图片" in md
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
