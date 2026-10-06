@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "solomon"
+version = "0.1.0"
+description = "视频/文档知识入库 + FTS5 语义问答的确定性管线（视频→转写→关键帧→识图→笔记→五层提炼→入库→检索问答）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "solomon" }]
+keywords = ["knowledge-base", "ingest", "rag", "fts5", "obsidian", "video-notes"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Text Processing :: Markup :: Markdown",
+]
+
+dependencies = [
+    "yt-dlp>=2024.0.0",
+    "opencv-python-headless>=4.8",
+    "numpy>=1.24",
+    "jieba>=0.42",
+    "faster-whisper>=1.0",
+    "sherpa-onnx>=1.10",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+    "trafilatura>=1.8",
+    "markitdown>=0.1",
+    "curl_cffi>=0.7",
+]
+
+[project.optional-dependencies]
+# 视频转写/关键帧的完整依赖（与运行库分离，避免普通问答安装重依赖）
+video = [
+    "opencv-python>=4.8",
+    "sherpa-onnx>=1.10",
+    "faster-whisper>=1.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+solomon = "solomon.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yourname/solomon"
+Documentation = "https://yourname.github.io/solomon/"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/solomon"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/solomon", "assets", "templates", "profiles", "docs", "patches"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

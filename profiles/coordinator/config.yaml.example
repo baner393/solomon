@@ -1,0 +1,40 @@
+# Coordinator（调度路由网关）— config 模板
+# 复制到 ~/.hermes/profiles/coordinator/config.yaml
+# 职责：常驻网关（渠道接入 + 确定性路由）；@solomon/@newsolomon 等由网关补丁直接分发
+
+model:
+  provider: custom:sensenova-4key-3458
+  model: sensenova-6.8-flash-lite
+
+fallback_providers:
+- provider: custom:sensenova-4key-3456
+  model: sensenova-6.8-flash-lite
+
+agent:
+  gateway_timeout: 1800
+  gateway_timeout_warning: 900
+  gateway_notify_interval: 180
+  approvals:
+    mode: manual          # 危险命令人工审批（删除等走网关确定性路由有二次确认，双保险）
+    timeout: 60
+
+# LLM 代理提供者（scripts/sensenova-proxy 启动的端口）
+providers:
+  sensenova-4key-3456:
+    base_url: http://127.0.0.1:3456/v1
+    api_key: proxy
+  sensenova-4key-3458:
+    base_url: http://127.0.0.1:3458/v1
+    api_key: proxy
+
+# 渠道接入（按需启用；凭据放同目录 .env，key 见 profiles/env.example）
+gateway:
+  platforms:
+    qqbot:
+      enabled: true
+    feishu:
+      enabled: false      # 需要飞书自建应用时改 true
+    weixin:
+      enabled: false
+    email:
+      enabled: false

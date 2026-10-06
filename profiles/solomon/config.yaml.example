@@ -1,0 +1,29 @@
+# Solomon profile 配置模板（solomon 问答 agent）
+# 复制到 ~/.hermes/profiles/solomon/config.yaml
+# LLM 走本地 SenseNova 4Key 轮换代理（scripts/sensenova-proxy/），也可换成任意 OpenAI 兼容端点
+
+model:
+  provider: custom:sensenova-4key-3458      # 代理进程注册的 provider 名
+  model: sensenova-6.8-flash-lite
+
+fallback_providers:
+- provider: custom:sensenova-4key-3456     # 备池（视觉/通用池顶上）
+  model: sensenova-6.8-flash-lite
+
+agent:
+  gateway_timeout: 1800                    # 会话回答超时（秒）
+  gateway_timeout_warning: 900
+  # 学习路线/知识问答场景：禁用 session_search（历史会话搜索会爆上下文，
+  # 路线恢复走 memories/roadmaps/ 文件体系）
+  disabled_toolsets: [session_search]
+  # memory 工具写入配额（字符）；MEMORY.md 是每会话自动注入的指针文件
+  memory_char_limit: 2200
+
+# LLM 代理提供者定义（与 scripts/sensenova-proxy 启动的两个端口对应）
+providers:
+  sensenova-4key-3456:
+    base_url: http://127.0.0.1:3456/v1
+    api_key: proxy
+  sensenova-4key-3458:
+    base_url: http://127.0.0.1:3458/v1
+    api_key: proxy

@@ -1,0 +1,981 @@
+diff --git a/gateway/platforms/qqbot/adapter.py b/gateway/platforms/qqbot/adapter.py
+index 379e6a82c0..4f755684b5 100644
+--- a/gateway/platforms/qqbot/adapter.py
++++ b/gateway/platforms/qqbot/adapter.py
+@@ -1347,13 +1347,32 @@ class QQAdapter(BasePlatformAdapter):
+     async def send(
+         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None,
+     ) -> SendResult:
+-        """Send text/markdown: format, split via truncate_message(), retry transient failures."""
++        """Send text/markdown: format, split via truncate_message(), retry transient failures.
++
++        MEDIA:<local-path> 图片先作为原生图片消息投递，再发余下文本（对齐 weixin.send；
++        2026-10-03 知识库图文问答：solomon 回答复用 vault 截图，profile 路由回复
++        未经 agent turn 管道，直接走本 send——不解析的话 MEDIA: 会当纯文本发出）。"""
+         del metadata
+         if not await self._ensure_connected():
+             return self._NOT_CONNECTED
+         if not content or not content.strip():
+             return SendResult(success=True)
+ 
++        media_files, content = self.extract_media(content)
++        if media_files:
++            for path, _is_voice in self.filter_media_delivery_paths(media_files):
++                if Path(path).suffix.lower() not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
++                    logger.info("[%s] skip non-image MEDIA delivery: %s", self._log_tag, path)
++                    continue
++                result = await self.send_image_file(chat_id, path)
++                if not result.success:
++                    logger.warning("[%s] MEDIA image delivery failed for %s: %s",
++                                   self._log_tag, path, result.error)
++            if not content or not content.strip():
++                return SendResult(success=True)
++        if not await self._ensure_connected():
++            return self._NOT_CONNECTED
++
+         chunks = self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH)
+         last_result = SendResult(success=False, error="No chunks")
+         for chunk in chunks:
+diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
+index 94a9c8346d..863ba06a22 100644
+--- a/gateway/run_inbound.py
++++ b/gateway/run_inbound.py
+@@ -34,6 +34,32 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
+ # Log-record parity with the origin module.
+ logger = logging.getLogger("gateway.run")
+ 
++_DELETE_VAULT_GLOBAL = "/mnt/d/all/ai_agent_about/solomon"
++
++
++def _gateway_known_titles() -> list:
++    """读取 vault 页面标题列表（concepts/entities/comparisons 的 .md 文件名，去掉扩展名）。
++    供批量删除的「最长匹配拆分」用：把连写的多个标题（空格分隔）按已知标题切开。"""
++    titles = []
++    try:
++        for sub in ("concepts", "entities", "comparisons"):
++            d = os.path.join(_DELETE_VAULT_GLOBAL, sub)
++            if not os.path.isdir(d):
++                continue
++            for fn in os.listdir(d):
++                if fn.endswith(".md"):
++                    titles.append(os.path.splitext(fn)[0])
++    except Exception:
++        pass
++    return titles
++
++
++def _strip_feishu_mention(text: str) -> str:
++    """剥离飞书 @提及 前缀（"[Mentioned: newsolomon (open_id=...)]\n\n@newsolomon ..."），
++    否则锚定 ^@newsolomon 的路由正则全部失配（2026-10-01 事故）。非飞书消息原样返回。"""
++    m = re.match(r"^\[Mentioned:[^\]]*\](?:\s*\n\s*)*", text)
++    return text[m.end():].strip() if m else text
++
+ 
+ class GatewayInboundMixin:
+     """Inbound message pipeline (_handle_message, text/media preparation, durable-turn markers, plugin injection) for GatewayRunner."""
+@@ -1176,6 +1202,827 @@ class GatewayInboundMixin:
+             logger.debug("FIFO orphan rescue pre-claim failed for %s", _quick_key, exc_info=True)
+             return event, source, is_internal
+ 
++    # ------------------------------------------------------------------
++    # 确定性 @/@@ profile 路由（不经过 coordinator LLM，解决 SOUL 提示词路由不稳）
++    # ------------------------------------------------------------------
++    _PROFILE_ROUTE_STATE = "/home/baner/.hermes/gateway_default_profiles.json"
++    _HERMES_BIN = "/home/baner/.local/share/pipx/venvs/hermes-agent/bin/hermes"
++    _DELETE_SCRIPT = "/home/baner/solomon/src/solomon/pipeline/kb_delete.py"
++    _PROFILE_SYNC_SCRIPT = "/home/baner/solomon/src/solomon/pipeline/profile_sync.py"
++    _DELETE_VAULT = "/mnt/d/all/ai_agent_about/solomon"
++    _CLEAN_SCRIPT = "/home/baner/solomon/src/solomon/pipeline/clean_cache.py"
++    # clean_cache.py 的语义：WORK_ROOT 下的一级目录 = 每个视频的 workdir。
++    # 必须指向 VideoNotes 本身——不能用 dirname(_TMP_ROOT)（=ObsidianSpace），
++    # 否则 TempNotes/VideoNotes 整个目录会被当成清理目标 rmtree（2026-10-04 复现）。
++    _WORK_ROOT = "/mnt/d/ObsidianSpace/VideoNotes"
++    _INGEST_SCRIPT = "/home/baner/solomon/src/solomon/pipeline/ingest.py"
++    _TMP_ROOT = "/mnt/d/ObsidianSpace/TempNotes"
++    # newsolomon 不在确定性路由白名单：入库消息必须走 coordinator SOUL 规则1c
++    # （ingest_with_progress.sh + 进度推送）。若经 chat -Q -q 短路到 newsolomon agent，
++    # agent 会裸推理 10min-2h 远超 _run_profile_query 的 300s 超时 → 用户只收到
++    # 「⏱️ newsolomon 回答超时」25 字短消息（2026-09-10 事故，见 infra/HANDOFF-接续）。
++    _ROUTABLE_PROFILES = frozenset({"solomon", "writer", "researcher", "publisher"})
++
++    _DELETE_RE = re.compile(
++        r"^\s*@newsolomon\s+(?:删除|删掉|移除|清除)\s+(.+?)\s*$", re.I)
++    _DELETE_CONFIRM_RE = re.compile(
++        r"^\s*确认删除\s*(.+?)\s*$", re.I)
++    # 帮助（@newsolomon/@solomon 都响应；须在 profile 路由之前检查，否则被 @solomon 抢走）
++    _HELP_RE = re.compile(
++        r"^\s*(?:@help|@(?:newsolomon|solomon)\s+(?:帮助|help|命令|菜单))\s*$", re.I)
++    # 清理缓存（清处理中间产物：正式视频 workdir + 临时学习区 + Windows 残留）
++    _CLEAN_RE = re.compile(
++        r"^\s*@newsolomon\s+(?:清理缓存|清缓存)\s*(.*?)\s*$", re.I)
++    _CLEAN_CONFIRM_RE = re.compile(
++        r"^\s*确认清理缓存\s*(.*?)\s*$", re.I)
++    # 临时读取（不入库，产物落临时学习区，可随后转正）+ 转正
++    _PEEK_RE = re.compile(
++        r"^\s*@newsolomon\s+(?:临时读取|临时看看|临时看|peek)\s+(.+?)\s*$", re.I)
++    _PROMOTE_RE = re.compile(
++        r"^\s*@newsolomon\s+(?:转正|转为正式)\s+(.+?)\s*$", re.I)
++
++    async def _run_delete_script(self, targets: list, dry_run: bool) -> str:
++        """跑 kb_delete.py（支持批量多目标），返回其输出。dry_run=True 只预览不删。"""
++        cmd = ["python3.14", self._DELETE_SCRIPT] + list(targets)
++        if dry_run:
++            cmd.append("--dry-run")
++        env = dict(os.environ)
++        env["SOLOMON_VAULT"] = self._DELETE_VAULT
++        try:
++            proc = await asyncio.create_subprocess_exec(
++                *cmd, stdout=asyncio.subprocess.PIPE,
++                stderr=asyncio.subprocess.STDOUT, env=env,
++            )
++            out, _ = await asyncio.wait_for(proc.communicate(), timeout=180)
++            return out.decode("utf-8", errors="replace").strip()
++        except asyncio.TimeoutError:
++            return "⏱️ 删除脚本执行超时（>180s），未完成"
++        except Exception as exc:  # noqa: BLE001
++            logger.warning("kb_delete failed: %s", exc)
++            return f"⚠️ 删除脚本执行失败：{exc}"
++
++    @staticmethod
++    def _split_delete_targets(raw: str) -> list:
++        """把「删除 A、B、C」原文拆成多个标题。
++
++        标题自身可能含空格（如「超级个体Vibe Coding创业」），不能按空格拆。
++        拆分顺序：
++          1. 顿号/逗号/分号/换行/「和」「与」分隔 → 每段独立
++          2. 若只有一段 → 用 vault 现有页面标题做「最长匹配」拆分
++             （如「A B C」三个标题连写空格分隔，逐个匹配已知标题）
++        """
++        parts = [p.strip() for p in re.split(r"[、，,；;\n]+", raw) if p.strip()]
++        if len(parts) > 1:
++            return parts
++        # 单段：尝试用 vault 已知标题拆分（最长优先，避免子串误切）
++        try:
++            known = sorted(_gateway_known_titles(), key=len, reverse=True)
++        except Exception:
++            known = []
++        found = []
++        rest = raw.strip()
++        for title in known:
++            if title and title in rest:
++                found.append(title)
++                rest = rest.replace(title, "", 1)
++        # 匹配到 ≥2 个已知标题即视为批量（剩余碎片忽略可能是已删/不存在页面）
++        if len(found) >= 2:
++            return found
++        return parts
++
++    async def _hm_deterministic_delete(
++        self, event: "MessageEvent"
++    ) -> Optional[str]:
++        """确定性删除路由：@newsolomon 删除 <标题...> → dry-run 预览 + 引导确认；
++        「确认删除 <标题...>」→ 执行真实删除（支持批量，逗号/顿号/空格分隔）。
++        完全不经 coordinator agent，避免 agent 手拼 rm/mv 造成半删（2026-09-14 实测事故）。"""
++        text = _strip_feishu_mention((getattr(event, "text", None) or "").strip())
++        if not text or text.startswith("/"):
++            return None
++
++        m = self._DELETE_RE.match(text)
++        if m:
++            targets = self._split_delete_targets(m.group(1).strip())
++            label = "、".join(targets)
++            out = await self._run_delete_script(targets, dry_run=True)
++            return (
++                f"将删除以下内容（先预览，确认后回复「确认删除 {label}」）：\n\n{out}"
++            )
++
++        # confirm 分支已上移至 _hm_deterministic_confirm（先于 profile_route，2026-10-04）
++
++        return None
++
++    # ---- 确定性「记住」路由（2026-09-15）：@newsolomon 记住：xxx → 个人信息
++    #      追加到知识库档案（entities/用户档案.md）+ 回写全部 profile USER.md）----
++    _REMEMBER_RE = re.compile(
++        r"^\s*@newsolomon\s+(?:记住|记得|添加个人信息|加个人信息)\s*[:：]?\s*(.+?)\s*$", re.I)
++
++    async def _run_profile_add(self, text: str) -> str:
++        """跑 profile_sync.py add，返回输出。"""
++        cmd = ["python3.14", self._PROFILE_SYNC_SCRIPT, "add", text]
++        env = dict(os.environ)
++        env["SOLOMON_VAULT"] = _DELETE_VAULT_GLOBAL
++        try:
++            proc = await asyncio.create_subprocess_exec(
++                *cmd, stdout=asyncio.subprocess.PIPE,
++                stderr=asyncio.subprocess.STDOUT, env=env,
++            )
++            out, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
++            return out.decode("utf-8", errors="replace").strip()
++        except asyncio.TimeoutError:
++            return "⏱️ 记忆写入超时（>60s）"
++        except Exception as exc:  # noqa: BLE001
++            logger.warning("profile add failed: %s", exc)
++            return f"⚠️ 记忆写入失败：{exc}"
++
++    async def _hm_deterministic_remember(
++        self, event: "MessageEvent"
++    ) -> Optional[str]:
++        """@newsolomon 记住：xxx → 个人信息写入知识库档案（自增长）。"""
++        text = _strip_feishu_mention((getattr(event, "text", None) or "").strip())
++        if not text or text.startswith("/"):
++            return None
++        m = self._REMEMBER_RE.match(text)
++        if not m:
++            return None
++        content = m.group(1).strip()
++        if len(content) < 3:
++            return "请提供要记住的内容，如：@newsolomon 记住：我是XX，在YYY工作"
++        out = await self._run_profile_add(content)
++        return f"🧠 已记住（写入知识库档案）：\n{out}"
++
++    # ---- 确定性入库路由（2026-09-14）：@newsolomon 入库 <内容> 直接跑 ingest，
++    #      不经 coordinator agent（避免它反问/自作主张，与删除路由同层）----
++    _INGEST_RE = re.compile(
++        r"^\s*@newsolomon\s+(?:入库|收录|导入|记录)\s+(.+?)\s*$", re.I)
++    _INGEST_PROGRESS = "/home/baner/.hermes/infra/bin/ingest_with_progress.sh"
++
++    @staticmethod
++    def _parse_ingest_input(raw: str) -> "tuple[str, str]":
++        """解析「入库 <内容> [标题：xxx]」→ (ingest输入, --title 参数或空)。
++
++        「标题：xxx / 标题: xxx / 题目：xxx」后的部分作为 --title。
++        其余原样透传给 ingest.py。
++        """
++        m = re.search(r"(?:标题|题目)[:：]\s*(.+?)\s*$", raw)
++        if m:
++            title = m.group(1).strip()
++            body = raw[: m.start()].strip()
++            # 去掉可能残留的引号（subprocess 不经 shell，引号是字面字符）
++            title = title.strip('"\'“”《》【】。；，,; \t\n')
++            return body, f"--title {title}"
++        return raw.strip(), ""
++
++    @staticmethod
++    def _parse_ingest_flags(body: str) -> "tuple[str, list]":
++        """把 body 里的参数 flag 剥出成独立 argv，返回 (剩余 body, flag argv)。
++
++        body 是单 argv 透传给 ingest.py——argparse 对含空格/紧贴标点的 token
++        解析不出 flag（2026-10-03 用户实测「--images【标题】 URL」整串被判
++        text 入库成文档；--name/--text 经网关同样失效）。flag：
++        --images（含 coordinator SOUL 旧约定 /配图版）、--force、--fast、
++        --name/--text（取值到「标题：」前）。"""
++        extra: list = []
++        # 触发词 → ingest.py argv 映射（/配图版 是 coordinator SOUL 旧约定，映射 --images）
++        for pat, arg in ((r"(?:^|\s)(?:--images\b|/配图版)", "--images"),
++                         (r"(?:^|\s)--fast\b", "--fast"),
++                         (r"(?:^|\s)--force\b", "--force")):
++            m = re.search(pat, body, re.I)
++            if m:
++                extra.append(arg)
++                body = body[:m.start()] + " " + body[m.end():]
++        for pat, val in ((r"(?:^|\s)--name\s+(.+?)(?=\s+标题[:：]|\s*$)", "--name"),
++                         (r"(?:^|\s)--text\s+(.+?)(?=\s+标题[:：]|\s*$)", "--text")):
++            m = re.search(pat, body, re.I | re.S)
++            if m:
++                extra.extend([val, m.group(1).strip().strip('"\'“”')])
++                body = body[:m.start()] + " " + body[m.end():]
++        return re.sub(r"\s+", " ", body).strip(), extra
++
++    async def _hm_deterministic_ingest(
++        self, event: "MessageEvent", source: "SessionSource"
++    ) -> Optional[str]:
++        """确定性入库：@newsolomon 入库 <url|文件|--name|--text> [标题：xxx] →
++        后台启动 ingest_with_progress.sh（跑 ingest.py + watcher 推进度），
++        直接回确认。不经 coordinator agent。"""
++        text = _strip_feishu_mention((getattr(event, "text", None) or "").strip())
++        if not text or text.startswith("/"):
++            return None
++        m = self._INGEST_RE.match(text)
++        if not m:
++            return None
++        body, title_arg = self._parse_ingest_input(m.group(1).strip())
++        # flag 剥离（--images/--force/--name/--text，含 /配图版 旧约定）——必须在
++        # 空 body 检查前（「--text 内容」剥完 body 可能为空但 flag 有效），
++        # 且在批量后缀解析前（--text 内容里可能恰好含「全部入库」字样）。
++        body, flag_args = self._parse_ingest_flags(body)
++        if not body and not flag_args:
++            return "📦 请输入要入库的内容（视频/网页 URL、文件路径、--name 标题、或 --text 文本）"
++
++        # 目标渠道：按来源平台推导（QQ/飞书）
++        platform = getattr(source, "platform", None)
++        pv = platform.value if platform else ""
++        chat_id = getattr(source, "chat_id", None) or ""
++        if pv == "qqbot":
++            target = f"qqbot:{chat_id}"
++        elif pv == "feishu":
++            target = f"feishu:{chat_id}"
++        else:
++            target = f"{pv}:{chat_id}" if pv and chat_id else ""
++
++        # 批量后缀解析（2026-09-27）：默认只入分享链接指向的这一集（ingest.py 新默认），
++        # 消息末尾带「全部入库/整个合集/全系列/全部」才全量，带「前N集」只入前 N 集。
++        # 只匹配消息末尾且前面有空白，避免剥掉标题里的同名词。
++        bulk_args: list = []
++        m_front = re.search(r"(?:^|\s)前\s*(\d+)\s*集\s*$", body)
++        m_bulk = None if m_front else re.search(r"(?:^|\s)(全部入库|整个合集|全系列|全部)\s*$", body)
++        if m_front:
++            body = body[:m_front.start()] + body[m_front.end():]
++            bulk_args = ["--max-parts", m_front.group(1)]
++        elif m_bulk:
++            body = body[:m_bulk.start()] + body[m_bulk.end():]
++            bulk_args = ["--all-parts"]
++        body = re.sub(r"\s+", " ", body).strip()
++
++        # 后台启动（detached），进度由脚本内 watcher 逐行推送，不阻塞网关
++        # flag_args 在 body 前（wrapper "$@" 全透传 ingest.py，argparse 正常解析）
++        cmd = ["bash", self._INGEST_PROGRESS, target or "qqbot:FAEDEE34F6F18627B382D60675233CFD"]
++        cmd.extend(flag_args)
++        if body:
++            cmd.append(body)
++        cmd.extend(bulk_args)
++        if title_arg:
++            cmd.extend(title_arg.split(" ", 1))  # ["--title", "xxx"]
++        # 注入生产 env（网关子进程可能缺 SOLOMON_VAULT/WORK_ROOT/代理，2026-09-14 实测）
++        env = dict(os.environ)
++        env.setdefault("SOLOMON_VAULT", "/mnt/d/all/ai_agent_about/solomon")
++        env.setdefault("WORK_ROOT", "/mnt/d/ObsidianSpace/VideoNotes")
++        env.setdefault("http_proxy", "http://127.0.0.1:7890")
++        env.setdefault("https_proxy", "http://127.0.0.1:7890")
++        env.setdefault("PYTHONPATH", "/home/baner/.local/lib/python3.14/site-packages:/usr/lib/python3/dist-packages")
++        try:
++            proc = await asyncio.create_subprocess_exec(
++                *cmd,
++                stdout=asyncio.subprocess.DEVNULL,
++                stderr=asyncio.subprocess.DEVNULL,
++                start_new_session=True,  # detached：网关重启/会话结束不杀
++                env=env,
++            )
++            # 不等它完成：立即回确认，进度由 watcher 推
++            logger.info("Deterministic ingest started pid=%s target=%s input=%s",
++                        proc.pid, target, body[:60])
++        except Exception as exc:  # noqa: BLE001
++            logger.warning("Deterministic ingest failed: %s", exc)
++            return f"⚠️ 入库启动失败：{exc}"
++        return (
++            f"📦 开始入库：{' '.join(flag_args) + ' ' if flag_args else ''}{body}\n"
++            f"{f'标题：{title_arg[8:].strip(chr(34))}' if title_arg else ''}\n"
++            f"进度会陆续推给你（去重：同标题自动替换旧页）"
++        )
++
++    # ---- 帮助 / 清理缓存 / 临时读取 / 转正 确定性路由（2026-09-16）----
++    # 文案原则（2026-10-02 用户反馈「看不懂+覆盖不够」重写，二版补 --images/--force）：
++    # 每条命令给可直接照抄的真实示例 + 一句人话说明；确认类操作必须写明第二步
++    # 回复格式；▸ 引导示例、← 行尾注释；FAQ 沉淀无输出重发（九·十六）/后台推送
++    # （九·二十一）经验。内部参数（--workdir/--skip-preflight/--progress-file/
++    # --from-notes/--peek/--category）不进手册。
++    _HELP_TEXT = (
++        "🤖 Solomon 使用手册\n"
++        "（发 @help 随时查看本手册）\n"
++        "\n"
++        "📦 入库\n"
++        "▸ 发链接（最常用）：\n"
++        "@newsolomon 入库 https://www.bilibili.com/video/BVxxxx\n"
++        "▸ 飞书文档（wiki/docx 链接，自动读正文）：\n"
++        "@newsolomon 入库 https://xxx.feishu.cn/wiki/xxxx\n"
++        "▸ 本地文件（md/pdf/docx/xlsx/html/epub）：\n"
++        "@newsolomon 入库 D:\\资料\\面试笔记.md\n"
++        "▸ 按标题搜视频 / 直接记录文字：\n"
++        "@newsolomon 入库 --name 视频标题\n"
++        "@newsolomon 入库 --text 想记录的一段话\n"
++        "\n"
++        "可选（加在消息里）：\n"
++        "· --images 识别画面给笔记配图（内容更全；默认纯文字快速入库；写 /配图版 等效）\n"
++        "· --force 全量重跑（笔记缺块、要重新提炼时用它补全）\n"
++        "· 标题：xxx（写在末尾，自定义知识库页标题）\n"
++        "\n"
++        "规则：\n"
++        "· 合集默认只入分享的这一集；末尾加「全部入库」入整个合集，加「前3集」只入前3集\n"
++        "· 同标题重复入库自动替换旧内容\n"
++        "· 路径支持 UNC（\\\\wsl.localhost\\…）和全角冒号（D：\\），直接复制粘贴\n"
++        "· 链接带不带 https:// 都认（b23.tv/xxx 裸短链也行）\n"
++        "\n"
++        "📌 临时学习区（先看看，好再入库）\n"
++        "@newsolomon 临时读取 https://b23.tv/xxxx\n"
++        "（不入库，处理成笔记放临时区；加 --fast 更快）\n"
++        "@solomon 临时 这个视频讲了啥 ← 只搜临时区\n"
++        "@newsolomon 转正 视频标题 ← 满意，转正式\n"
++        "@newsolomon 清理缓存 临时 ← 不要了，清掉\n"
++        "\n"
++        "✏️ 知识库维护\n"
++        "@newsolomon 删除 笔记标题\n"
++        "（先预览，回复「确认删除 笔记标题」才执行；删掉/移除也认；多标题用顿号隔开）\n"
++        "@newsolomon 清理缓存 [临时｜工作目录｜残留]\n"
++        "（清中间产物，先预览，回复「确认清理缓存」执行）\n"
++        "@newsolomon 记住：我是XX，在YY做ZZ\n"
++        "（写入个人档案并同步给所有 agent；说「记得」也认）\n"
++        "\n"
++        "💬 问答\n"
++        "@solomon 你的问题 → 检索知识库回答（临时区内容标📌）\n"
++        "@@solomon → 设为本会话默认，之后免 @；发 @@ 取消\n"
++        "\n"
++        "❓ 卡住了\n"
++        "· 超时或「（solomon 无输出）」→ 重发一次即可（自动换新会话）\n"
++        "· 入库没动静 → 后台在跑，完成或出错都会推送；久无推送再重发"
++    )
++
++    async def _run_clean_script(self, targets: list, execute: bool) -> str:
++        """跑 clean_cache.py（预览或删除），返回其输出。"""
++        cmd = ["python3.14", self._CLEAN_SCRIPT]
++        if targets:
++            cmd += ["--targets", *targets]
++        if execute:
++            cmd.append("--execute")
++        env = dict(os.environ)
++        env["SOLOMON_VAULT"] = self._DELETE_VAULT
++        env["WORK_ROOT"] = self._WORK_ROOT
++        env.setdefault("PYTHONPATH",
++                       "/home/baner/.local/lib/python3.14/site-packages:/usr/lib/python3/dist-packages")
++        try:
++            proc = await asyncio.create_subprocess_exec(
++                *cmd, stdout=asyncio.subprocess.PIPE,
++                stderr=asyncio.subprocess.STDOUT, env=env,
++            )
++            out, _ = await asyncio.wait_for(proc.communicate(), timeout=900)
++            return out.decode("utf-8", errors="replace").strip()
++        except asyncio.TimeoutError:
++            return "⏱️ 清理脚本执行超时（>180s），未完成"
++        except Exception as exc:  # noqa: BLE001
++            logger.warning("clean_cache failed: %s", exc)
++            return f"⚠️ 清理脚本执行失败：{exc}"
++
++    async def _hm_deterministic_confirm(
++        self, event: "MessageEvent", source: "SessionSource"
++    ) -> Optional[str]:
++        """确认类回复路由（确认清理缓存/确认删除）——**必须先于 profile_route 检查**：
++        有默认 profile 的渠道裸发确认会被 profile_route 当对话抢走（2026-10-04 实测：
++        飞书 @@solomon 默认下「确认清理缓存」被发给 solomon agent，confirm 分支永不到达）。
++        两类确认均后台执行 + 完成推送（drvfs 删除慢，同步静默会被当卡死发 /stop 误杀）。"""
++        text = _strip_feishu_mention((getattr(event, "text", None) or "").strip())
++        if not text or text.startswith("/"):
++            return None
++        target = self._source_target(source)
++
++        m = self._CLEAN_CONFIRM_RE.match(text)
++        if m:
++            targets = [t.strip() for t in re.split(r"[、，,；;\s]+", m.group(1)) if t.strip()]
++            # 纯标点目标（如「确认清理缓存！」的「！」）丢弃 → 视为全量确认，防怪回复
++            targets = [t for t in targets if re.search(r"[\w\u4e00-\u9fff]", t)]
++            label = "、".join(targets) if targets else "全部"
++            asyncio.create_task(self._run_clean_and_notify(targets, target))
++            return (
++                f"🧹 清理任务已启动（目标：{label}），正在后台删除。\n"
++                f"删除为跨系统盘操作，可能需要 1-5 分钟；完成后会把结果推送到本渠道。\n"
++                f"等待期间无需任何操作（此任务不受 /stop 影响）。"
++            )
++
++        m = self._DELETE_CONFIRM_RE.match(text)
++        if m:
++            targets = self._split_delete_targets(m.group(1).strip())
++            label = "、".join(targets)
++            asyncio.create_task(self._run_delete_and_notify(targets, target))
++            return (
++                f"🗑 删除任务已启动（{label}），正在后台执行。\n"
++                f"完成后会把结果推送到本渠道（此任务不受 /stop 影响）。"
++            )
++        return None
++
++    async def _run_delete_and_notify(self, targets: list, target: str) -> None:
++        """后台执行笔记删除并推送结果。"""
++        try:
++            out = await self._run_delete_script(targets, dry_run=False)
++            body = f"🗑 删除结果：\n\n{out}"
++        except Exception as exc:  # noqa: BLE001
++            logger.warning("delete_and_notify execute failed: %s", exc)
++            body = f"⚠️ 删除执行失败：{exc}"
++        await self._notify_result(target, body)
++
++    async def _notify_result(self, target: str, body: str) -> None:
++        """hermes send 推回原渠道（fire-and-forget，失败记日志）。"""
++        if not target:
++            logger.warning("notify result has no target; dropped")
++            return
++        try:
++            proc = await asyncio.create_subprocess_exec(
++                self._HERMES_BIN, "send", "--to", target,
++                stdin=asyncio.subprocess.PIPE,
++                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
++            )
++            await asyncio.wait_for(proc.communicate(body.encode("utf-8")), timeout=60)
++            logger.info("Result delivered to %s (%d chars)", target, len(body))
++        except Exception as exc:  # noqa: BLE001
++            logger.warning("notify to %s failed: %s", target, exc)
++
++    async def _hm_deterministic_help(self, event: "MessageEvent") -> Optional[str]:
++        """确定性帮助：@newsolomon/@solomon 帮助/命令 → 返回命令清单（静态文本）。"""
++        text = _strip_feishu_mention((getattr(event, "text", None) or "").strip())
++        if not text:
++            return None
++        if self._HELP_RE.match(text):
++            return self._HELP_TEXT
++        return None
++
++    async def _hm_deterministic_clean(self, event: "MessageEvent", source: "SessionSource") -> Optional[str]:
++        """确定性清理缓存：@newsolomon 清理缓存 [目标] → dry-run 预览 →
++        「确认清理缓存 [目标]」→ 真实删除。删除类危险操作，与删除路由同层防御。"""
++        text = _strip_feishu_mention((getattr(event, "text", None) or "").strip())
++        if not text or text.startswith("/"):
++            return None
++
++        m = self._CLEAN_RE.match(text)
++        if m:
++            targets = [t.strip() for t in re.split(r"[、，,；;\s]+", m.group(1)) if t.strip()]
++            label = "、".join(targets) if targets else "全部"
++            out = await self._run_clean_script(targets, execute=False)
++            return (
++                f"🧹 清理缓存预览（{label}，先确认再删）：\n\n{out}\n\n"
++                f"确认后回复「确认清理缓存{(' ' + label) if targets else ''}」"
++            )
++
++        # confirm 分支已上移至 _hm_deterministic_confirm（先于 profile_route，2026-10-04）
++
++        return None
++
++    @staticmethod
++    def _source_target(source: "SessionSource") -> str:
++        """来源渠道 → hermes send 目标串（feishu:oc_xxx / qqbot:xxx）。"""
++        pv = getattr(getattr(source, "platform", None), "value", "") or ""
++        chat_id = getattr(source, "chat_id", None) or ""
++        return f"{pv}:{chat_id}" if pv and chat_id else ""
++
++    async def _run_clean_and_notify(self, targets: list, target: str) -> None:
++        """后台执行清理并把结果经 hermes send 推回原渠道（fire-and-forget）。"""
++        try:
++            out = await self._run_clean_script(targets, execute=True)
++            body = f"🧹 清理结果：\n\n{out}"
++        except Exception as exc:  # noqa: BLE001
++            logger.warning("clean_and_notify execute failed: %s", exc)
++            body = f"⚠️ 清理执行失败：{exc}"
++        await self._notify_result(target, body)
++
++    def _tmp_video_names(self) -> list:
++        """临时学习区的视频目录名（排除 concepts/.kb/隐藏项）。"""
++        if not os.path.isdir(self._TMP_ROOT):
++            return []
++        return sorted(
++            n for n in os.listdir(self._TMP_ROOT)
++            if os.path.isdir(os.path.join(self._TMP_ROOT, n))
++            and not n.startswith(".") and n not in ("concepts",)
++        )
++
++    def _resolve_temp_video(self, title: str):
++        """在临时学习区定位视频：TEMP_ROOT/<标题>/ 目录 + 其 _notes.md。
++
++        返回 (video_title, notes_path, workdir) 或 None。匹配：精确 → 包含（最长优先）。
++        """
++        if not os.path.isdir(self._TMP_ROOT):
++            return None
++        names = self._tmp_video_names()
++        hit = None
++        if title in names:
++            hit = title
++        else:
++            subs = [n for n in names if title in n or n in title]
++            if subs:
++                hit = max(subs, key=len)
++        if not hit:
++            return None
++        workdir = os.path.join(self._TMP_ROOT, hit)
++        notes = os.path.join(workdir, f"{hit}_notes.md")
++        if not os.path.exists(notes):
++            for f in os.listdir(workdir):
++                if f.endswith("_notes.md"):
++                    notes = os.path.join(workdir, f)
++                    break
++        if not os.path.exists(notes):
++            return None
++        return hit, notes, workdir
++
++    async def _spawn_progress_job(self, source: "SessionSource", extra: list) -> Optional[str]:
++        """后台 detached 跑 ingest_with_progress.sh（watcher 逐行推进度），立即回确认。
++
++        extra = ingest.py 参数（如 ["--peek", url] / ["--from-notes", ...]）。
++        返回 None=已启动；返回错误串=启动失败。"""
++        platform = getattr(source, "platform", None)
++        pv = platform.value if platform else ""
++        chat_id = getattr(source, "chat_id", None) or ""
++        if pv == "qqbot":
++            target = f"qqbot:{chat_id}"
++        elif pv == "feishu":
++            target = f"feishu:{chat_id}"
++        else:
++            target = f"{pv}:{chat_id}" if pv and chat_id else ""
++        cmd = ["bash", self._INGEST_PROGRESS,
++               target or "qqbot:FAEDEE34F6F18627B382D60675233CFD", *extra]
++        env = dict(os.environ)
++        env.setdefault("SOLOMON_VAULT", "/mnt/d/all/ai_agent_about/solomon")
++        env.setdefault("WORK_ROOT", "/mnt/d/ObsidianSpace/VideoNotes")
++        env.setdefault("http_proxy", "http://127.0.0.1:7890")
++        env.setdefault("https_proxy", "http://127.0.0.1:7890")
++        env.setdefault("PYTHONPATH",
++                       "/home/baner/.local/lib/python3.14/site-packages:/usr/lib/python3/dist-packages")
++        try:
++            proc = await asyncio.create_subprocess_exec(
++                *cmd, stdout=asyncio.subprocess.DEVNULL,
++                stderr=asyncio.subprocess.DEVNULL,
++                start_new_session=True,  # detached：网关重启/会话结束不杀
++                env=env,
++            )
++            logger.info("Deterministic progress job pid=%s target=%s extra=%s",
++                        proc.pid, target, extra[:80])
++        except Exception as exc:  # noqa: BLE001
++            logger.warning("Deterministic progress job failed: %s", exc)
++            return f"⚠️ 启动失败：{exc}"
++        return None
++
++    async def _hm_deterministic_peek(
++        self, event: "MessageEvent", source: "SessionSource"
++    ) -> Optional[str]:
++        """确定性临时读取：@newsolomon 临时读取 <url|--name 标题> [标题：xxx] [--fast] →
++        后台跑 ingest.py --peek（watcher 推进度）。产物落临时学习区，不入库，可随后转正。"""
++        text = _strip_feishu_mention((getattr(event, "text", None) or "").strip())
++        if not text or text.startswith("/"):
++            return None
++        m = self._PEEK_RE.match(text)
++        if not m:
++            return None
++        body, title_arg = self._parse_ingest_input(m.group(1).strip())
++        body, flag_args = self._parse_ingest_flags(body)  # --fast/--images/--name 等
++        if not body and not flag_args:
++            return "📌 请输入要临时读取的视频（URL 或 --name 标题）"
++        extra = ["--peek", *flag_args]
++        if body:
++            extra.append(body)
++        if title_arg:
++            extra.extend(title_arg.split(" ", 1))
++        err = await self._spawn_progress_job(source, extra)
++        if err:
++            return err
++        return (
++            f"📌 开始临时读取：{body}\n"
++            f"（不入库，处理到笔记放临时学习区；完成后可 @solomon 追问，"
++            f"或回复「转正 <标题>」正式入库）"
++        )
++
++    async def _hm_deterministic_promote(
++        self, event: "MessageEvent", source: "SessionSource"
++    ) -> Optional[str]:
++        """确定性转正：@newsolomon 转正 <标题> → 临时学习区内容 → 正式入库
++        （ingest.py --from-notes，后台 + watcher 进度）。"""
++        text = _strip_feishu_mention((getattr(event, "text", None) or "").strip())
++        if not text or text.startswith("/"):
++            return None
++        m = self._PROMOTE_RE.match(text)
++        if not m:
++            return None
++        title = m.group(1).strip().strip("，。；;,")
++        found = self._resolve_temp_video(title)
++        if not found:
++            names = self._tmp_video_names()
++            hint = "、".join(names[:8]) if names else "（临时区为空）"
++            return (
++                f"📌 临时区没找到「{title}」。当前临时区有：{hint}\n"
++                f"先用「临时读取」处理视频，再回复「转正 <标题>」。"
++            )
++        video_title, notes_path, workdir = found
++        err = await self._spawn_progress_job(
++            source, ["--from-notes", notes_path, "--workdir", workdir,
++                     "--title", video_title])
++        if err:
++            return err
++        return f"✨ 开始转正：{video_title}\n（临时区 → 正式入库，进度陆续推送）"
++
++    @staticmethod
++    def _route_state_key(source: "SessionSource") -> str:
++        return f"{source.platform.value}:{source.chat_id}"
++
++    def _route_state_load(self) -> Dict[str, Dict[str, Any]]:
++        """读取路由状态。旧格式 {key: "profile"} 迁移为 {key: {"profile":..,"sid":None}}。"""
++        data: Dict[str, Any] = {}
++        try:
++            with open(self._PROFILE_ROUTE_STATE, "r", encoding="utf-8") as f:
++                raw = json.load(f)
++            if isinstance(raw, dict):
++                data = raw
++        except (OSError, json.JSONDecodeError):
++            pass
++        for key, val in list(data.items()):
++            if isinstance(val, str):
++                data[key] = {"profile": val, "sid": None}
++            elif not isinstance(val, dict):
++                data.pop(key, None)
++        return data
++
++    def _route_state_save(self, state: Dict[str, Any]) -> None:
++        try:
++            tmp = self._PROFILE_ROUTE_STATE + ".tmp"
++            with open(tmp, "w", encoding="utf-8") as f:
++                json.dump(state, f, ensure_ascii=False)
++            os.replace(tmp, self._PROFILE_ROUTE_STATE)
++        except OSError:
++            logger.warning("Failed to save profile-route state", exc_info=True)
++
++    async def _run_profile_query(
++        self, profile: str, content: str, session_id: Optional[str] = None
++    ) -> "tuple[str, Optional[str]]":
++        """Run `hermes -p <profile> chat -Q -q "<content>" [--resume <session_id>]`。
++        返回 (answer, new_session_id)。-Q 让 stdout 只留最终回答，stderr 带 session_id。
++
++        健壮性（2026-09-27/28 事故系列）：
++        - 超时 kill 子进程——防 zombie 烧 token、断管道静默死亡、turn-lease 遗留堵死后续 resume
++        - resume 撞死进程 lease 时 hermes 秒回空 stdout（2s）；空输出且有 sid →
++          清 sid 重跑一次新会话自愈
++        - chat 300s 超时 → -z fresh oneshot 兜底一次（无历史包袱，绝大多数 <90s 出答案），
++          兜底仍失败才报超时
++        """
++        async def _chat_once(sid: Optional[str], timeout_s: float) -> "tuple[str, Optional[str]]":
++            cmd = [self._HERMES_BIN, "-p", profile, "chat", "-Q", "-q", content]
++            if sid:
++                cmd += ["--resume", sid]
++            proc = await asyncio.create_subprocess_exec(
++                *cmd,
++                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
++            )
++            try:
++                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
++            except asyncio.TimeoutError:
++                try:
++                    proc.kill()  # 防 zombie：等待也要回收，管道+lease 不能留给死进程
++                except Exception:  # noqa: BLE001
++                    pass
++                raise
++            answer = stdout.decode("utf-8", errors="replace").strip()
++            err = stderr.decode("utf-8", errors="replace")
++            m = re.search(r"session_id:\s*([0-9a-f_]+)", err)
++            new_sid = m.group(1) if m else sid
++            return (answer or ""), new_sid
++
++        try:
++            answer, new_sid = await _chat_once(session_id, 300)
++            if not answer and session_id:
++                # resume 空输出（典型=撞死进程 turn-lease 秒回）→
++                # ①先清该会话的「死进程遗留」lease 再用同 sid 重跑——保住上下文
++                #  （2026-10-03 学习会话断链 4 次复盘：超时 kill 后 lease 无法自清，
++                #   撞锁即弃 sid 的旧逻辑把可恢复的锁当成必须换会话）
++                # ②同 sid 重跑仍空（真锁竞争/会话损坏）才丢弃 sid 换新会话
++                cleared = await asyncio.to_thread(
++                    self._clear_dead_turn_leases, profile, session_id)
++                if cleared:
++                    logger.warning("Profile %s resume %s empty after clearing dead lease; "
++                                   "retrying SAME session to preserve context", profile, session_id)
++                    answer, new_sid = await _chat_once(session_id, 300)
++                if not answer:
++                    logger.warning("Profile %s resume %s returned empty output; retrying with fresh session",
++                                   profile, session_id)
++                    answer, new_sid = await _chat_once(None, 300)
++            if answer:
++                return answer, new_sid
++            return f"（{profile} 无输出——已重置会话，请重发一次）", None
++        except asyncio.TimeoutError:
++            # chat 超时（长会话上下文重算 / 上游挂流）→ 无历史 oneshot 兜底
++            logger.warning("Profile %s chat timed out; falling back to fresh oneshot", profile)
++            try:
++                fb = await self._oneshot_fresh(profile, content)
++                if fb:
++                    # fresh 兜底成功但 oneshot 无会话——**保留旧 sid**：上下文链不断，
++                    # 下一条消息继续 resume 原会话（fresh 那轮内容不进原会话，可接受；
++                    # 旧逻辑写 None 导致每次超时兜底都静默断链，2026-10-03 复盘）
++                    return fb, session_id
++            except Exception as exc:  # noqa: BLE001
++                logger.warning("Oneshot fallback failed for %s: %s", profile, exc)
++            return f"⏱️ {profile} 回答超时（>300s），已自动重试仍未完成，请稍后重发", None
++        except Exception as exc:  # noqa: BLE001
++            logger.warning("Deterministic route to %s failed: %s", profile, exc)
++            return f"⚠️ 路由到 {profile} 失败：{exc}", session_id
++
++    @staticmethod
++    def _clear_dead_turn_leases(profile: str, session_id: str) -> bool:
++        """清掉该会话「死进程遗留」的 turn-lease，返回是否有死锁被清理。
++
++        根因：chat 超时 kill 子进程后 lease 无法自清（expires ~34min），期间该会话
++        的所有 resume 撞锁秒回空。判活标准：holder 里的 pid 进程是否存活且 cmdline
++        含 hermes（防 pid 复用误清活进程的锁）——真在跑的不动，死的才清。
++        """
++        import sqlite3
++        db_path = f"/home/baner/.hermes/profiles/{profile}/state.db"
++        if not os.path.exists(db_path):
++            return False
++        try:
++            conn = sqlite3.connect(db_path, timeout=5)
++            try:
++                rows = conn.execute(
++                    "SELECT holder FROM session_turn_leases WHERE conversation_id=?",
++                    (session_id,)).fetchall()
++                if not rows:
++                    return False
++                dead_found = False
++                for (holder,) in rows:
++                    m = re.search(r"pid=(\d+)", holder or "")
++                    pid = int(m.group(1)) if m else 0
++                    alive = False
++                    if pid > 0:
++                        try:
++                            with open(f"/proc/{pid}/cmdline", "rb") as f:
++                                alive = b"hermes" in f.read()
++                        except OSError:
++                            alive = False
++                    if not alive:
++                        dead_found = True
++                if dead_found:
++                    conn.execute(
++                        "DELETE FROM session_turn_leases WHERE conversation_id=?",
++                        (session_id,))
++                    conn.commit()
++                    logger.warning("Cleared dead turn-lease for %s session %s "
++                                   "(holder pid gone); same-session retry can proceed",
++                                   profile, session_id)
++                return dead_found
++            finally:
++                conn.close()
++        except Exception:  # noqa: BLE001
++            logger.warning("clear_dead_turn_leases failed for %s/%s",
++                           profile, session_id, exc_info=True)
++            return False
++
++    async def _oneshot_fresh(self, profile: str, content: str, timeout_s: float = 240) -> str:
++        """无历史 oneshot（-z）兜底：fresh 会话没有上下文包袱，绝大多数 40-90s 出答案。"""
++        cmd = [self._HERMES_BIN, "-p", profile, "-z", content]
++        proc = await asyncio.create_subprocess_exec(
++            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
++        )
++        try:
++            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
++        except asyncio.TimeoutError:
++            try:
++                proc.kill()
++            except Exception:  # noqa: BLE001
++                pass
++            return ""
++        return stdout.decode("utf-8", errors="replace").strip()
++
++    async def _hm_deterministic_profile_route(
++        self, event: "MessageEvent", source: "SessionSource"
++    ) -> Optional[str]:
++        """确定性 @@/@ 路由。命中则返回要回给用户的文本，否则 None（走正常 coordinator turn）。"""
++        text = _strip_feishu_mention((getattr(event, "text", None) or "").strip())
++        if not text or text.startswith("/"):
++            return None
++        state = self._route_state_load()
++        key = self._route_state_key(source)
++
++        # @@<profile> = 设默认（重置会话）；@@（不带名）= 清默认
++        if text.startswith("@@"):
++            target = text[2:].strip()
++            if target:
++                prof = target.split()[0]
++                if prof in self._ROUTABLE_PROFILES:
++                    state[key] = {"profile": prof, "sid": None}
++                    self._route_state_save(state)
++                    return f"已切到 {prof}，之后直接发消息即可"
++                return None  # 未知 profile → 交回 coordinator
++            state.pop(key, None)
++            self._route_state_save(state)
++            return "已取消默认 profile，回到 coordinator"
++
++        # 解析要路由的 profile + 内容
++        if text.startswith("@"):
++            parts = text[1:].split(None, 1)
++            prof = parts[0] if parts else ""
++            content = parts[1].strip() if len(parts) > 1 else ""
++            if not (prof in self._ROUTABLE_PROFILES and content):
++                return None  # 未知 profile 或空内容 → 交回 coordinator
++        else:
++            entry = state.get(key)
++            prof = (entry.get("profile") or "") if isinstance(entry, dict) else ""
++            content = text
++            # newsolomon 已被移出 _ROUTABLE_PROFILES（入库走 coordinator 规则1c）；
++            # 历史 state 里可能残留 newsolomon 默认，命中时同样交回 coordinator。
++            if not prof or prof not in self._ROUTABLE_PROFILES:
++                return None
++
++        # 会话续接：仅当已存 profile 与本次一致时复用 sid，否则开新会话。
++        # sid 永久续接（2026-09-28 用户拍板）：上下文增长由 hermes 原生压缩接管
++        # （窗口 ~256k，阈值 ~50% 才触发摘要化，日常无感）；探测证实 233k token
++        # prefill 仅 32s，上下文大小不是响应瓶颈——真正的超时源是上游抖动，
++        # 由空输出自愈 + 超时 kill + -z fresh 兜底吸收。
++        entry = state.get(key)
++        sid = entry.get("sid") if (isinstance(entry, dict) and entry.get("profile") == prof) else None
++        answer, new_sid = await self._run_profile_query(prof, content, sid)
++        state[key] = {"profile": prof, "sid": new_sid}
++        self._route_state_save(state)
++        return answer
++
+     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
+         """Handle an incoming message from any platform: auth → command check → running-agent
+         interrupt → get/create session → build context → run agent → return response."""
+@@ -1189,6 +2036,44 @@ class GatewayInboundMixin:
+         if _paused_notice is not None:
+             return _paused_notice
+ 
++        # 确定性 @/@@ profile 路由（先于 coordinator agent turn，跳过 LLM 判断）
++        if not is_internal:
++            # 帮助（@newsolomon/@solomon 都响应；先于 profile 路由避免被 @solomon 抢走）
++            _help_reply = await self._hm_deterministic_help(event)
++            if _help_reply is not None:
++                return _help_reply
++            # 确认类回复（确认清理缓存/确认删除）先于 profile_route——有默认 profile
++            # 的渠道裸发确认曾被 profile_route 抢走当对话（2026-10-04 实测）
++            _confirm_reply = await self._hm_deterministic_confirm(event, source)
++            if _confirm_reply is not None:
++                return _confirm_reply
++            _route_reply = await self._hm_deterministic_profile_route(event, source)
++            if _route_reply is not None:
++                return _route_reply
++            # 确定性删除路由（不经 agent，杜绝手拼 rm/mv 半删，2026-09-14）
++            _del_reply = await self._hm_deterministic_delete(event)
++            if _del_reply is not None:
++                return _del_reply
++            # 确定性「记住」路由（个人信息 → 知识库档案自增长，2026-09-15）
++            _mem_reply = await self._hm_deterministic_remember(event)
++            if _mem_reply is not None:
++                return _mem_reply
++            # 确定性清理缓存路由（先预览→确认，删除类操作不经 agent，2026-09-16）
++            _clean_reply = await self._hm_deterministic_clean(event, source)
++            if _clean_reply is not None:
++                return _clean_reply
++            # 确定性入库路由（不经 agent，直接跑 ingest_with_progress.sh，2026-09-14）
++            _ingest_reply = await self._hm_deterministic_ingest(event, source)
++            if _ingest_reply is not None:
++                return _ingest_reply
++            # 确定性临时读取/转正路由（不经 agent，watcher 推进度，2026-09-16）
++            _peek_reply = await self._hm_deterministic_peek(event, source)
++            if _peek_reply is not None:
++                return _peek_reply
++            _promote_reply = await self._hm_deterministic_promote(event, source)
++            if _promote_reply is not None:
++                return _promote_reply
++
+         _quick_key = self._session_key_for_source(source)
+         _reply = await self._hm_pending_reply_intercepts(event, source, _quick_key)
+         if _reply is not None:
+diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
+index eb48876caf..e4c7722e0c 100644
+--- a/plugins/platforms/feishu/adapter.py
++++ b/plugins/platforms/feishu/adapter.py
+@@ -1557,10 +1557,27 @@ class FeishuAdapter(BasePlatformAdapter):
+     async def send(
+         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None,
+     ) -> SendResult:
+-        """Send a Feishu message."""
++        """Send a Feishu message.
++
++        MEDIA:<local-path> 图片先作为原生图片消息投递，再发余下文本（对齐
++        weixin/qqbot；2026-10-03 知识库图文问答：solomon 回答复用 vault 截图，
++        profile 路由回复直接走本 send，不解析的话 MEDIA: 会当纯文本发出）。"""
+         if not self._client:
+             return SendResult(success=False, error="Not connected")
+ 
++        media_files, content = self.extract_media(content)
++        if media_files:
++            for path, _is_voice in self.filter_media_delivery_paths(media_files):
++                if Path(path).suffix.lower() not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
++                    logger.info("[Feishu] skip non-image MEDIA delivery: %s", path)
++                    continue
++                result = await self.send_image_file(chat_id=chat_id, image_path=path)
++                if not result.success:
++                    logger.warning("[Feishu] MEDIA image delivery failed for %s: %s",
++                                   path, result.error)
++            if not content or not content.strip():
++                return SendResult(success=True)
++
+         formatted = self.format_message(content)
+         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+         # Decide markdown-vs-text once for the whole message: a chunk of a long
