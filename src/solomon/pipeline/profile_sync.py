@@ -40,8 +40,11 @@ def _log(msg):
 # ---------- 记忆读取 ----------
 
 def _iter_profiles() -> list:
-    """所有含 memories/ 的 profile 目录名（含 root）。"""
+    """所有含 memories/ 的 profile 目录名（含 root）。HERMES_HOME 无 profiles/ 时为空
+    （如纯 CLI 部署，无 hermes 集成——add 仍应成功写档案页，回写静默跳过）。"""
     names = []
+    if not os.path.isdir(PROFILES_DIR):
+        return names
     for d in sorted(os.listdir(PROFILES_DIR)):
         if os.path.isdir(os.path.join(PROFILES_DIR, d, "memories")):
             names.append(d)
