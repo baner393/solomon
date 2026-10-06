@@ -35,6 +35,8 @@ solomon ask "RAG 是什么"         # 知识库问答
 
 # 1. 安装
 pip install -e .          # 或 uv sync（推荐）
+# 注：当前版本 pip 会一并安装视频管线依赖（faster-whisper/opencv 等，下载约 700MB，
+# 慢网需耐心）。纯文档/问答用户也建议直接装——暂无最小安装分组。
 
 # 2. 配置：LLM 端点（唯一必配项）
 cp .env.example .env
@@ -102,7 +104,7 @@ vault/
 ## 环境要求
 
 - Python ≥ 3.10（生产验证版本 3.14，其他版本可用）
-- LLM 端点：任意 OpenAI 兼容服务（`.env` 配 `LLM_BASE_URL` + `LLM_API_KEY`；不配则回落本地代理 `127.0.0.1:3456`）
+- LLM 端点：任意 OpenAI 兼容服务（`.env` 配 `LLM_BASE_URL` + `LLM_API_KEY`；不配则回落本地代理 `127.0.0.1:3456`）。⚠️ LLM 调用**直连**端点（不经 HTTP_PROXY 代理 env）——受限网络请选机器可直连的端点，或用本地代理形态
 - 视频入库：yt-dlp + ffmpeg；B站直连无需代理；YouTube 等海外源需 `.env` 配 `HTTP_PROXY`
 - 可选：sherpa-onnx（字幕降级转写）、opencv（关键帧，装 `pip install -e ".[video]"`）
 

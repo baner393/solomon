@@ -144,13 +144,32 @@ class TestLlmEndpoints:
         monkeypatch.setenv("SENSENOVA_BASE_URL", "https://api.example.com/v1 ")
         assert self._llm()._endpoints() == ["https://api.example.com/v1"]
 
-    def test_api_key_default_proxy(self, monkeypatch):
-        import importlib
-        for k in ("LLM_API_KEY", "SENSENOVA_API_KEY"):
-            monkeypatch.delenv(k, raising=False)
-        llm = self._llm()
-        importlib.reload(llm)
-        assert llm.API_KEY == "proxy"
+    def test_api_key_default_proxy(self):
+        """子进程隔离验证 API_KEY 默认值（避免 importlib.reload 的全局副作用）。"""
+        import subprocess
+        code = (
+            "import sys; sys.path.insert(0, r'%s'); "
+            "import os; [os.environ.pop(k, None) for k in ('LLM_API_KEY', 'SENSENOVA_API_KEY')]; "
+            "import llm_client; print(llm_client.API_KEY)"
+        ) % (SRC / "solomon" / "pipeline")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert out.stdout.strip() == "proxy"
+
+
+class TestPreflight:
+    """preflight 冒烟：不联网（mock TCP 探活）。锁住 NameError 类回归——
+    preflight 引用的名字必须在 ingest 命名空间可解析（2026-10-06 P0 教训）。"""
+
+    def test_preflight_doc_smoke(self, monkeypatch, tmp_path):
+        sys.path.insert(0, str(SRC / "solomon" / "pipeline"))
+        import ingest
+
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        monkeypatch.setattr(ingest, "VAULT", str(vault))
+        monkeypatch.setattr(ingest, "_tcp_ok", lambda *a, **k: True)
+        # 不抛 SystemExit / NameError 即通过
+        ingest.preflight("doc")
 
 
 # ═══════════════════════════════════════════════════════════

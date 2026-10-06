@@ -280,7 +280,7 @@ def _vision_native(image_path, prompt, timeout=TIMEOUT):
             {"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{b64}"}},
         ],
     }]
-    return _chat(messages, temperature=0.2, max_tokens=1024, timeout=timeout)
+    return _chat(messages, temperature=0.2, max_tokens=2000, timeout=timeout)
 
 
 def _vision_node(script, image_path, prompt, timeout=TIMEOUT, max_retries=2):

@@ -60,6 +60,7 @@ TEMP_ROOT = default_temp_root()
 TEMPLATE_DIR = default_templates()
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import llm_client  # noqa: E402  # preflight 引用 llm_client._endpoints()，必须绑定模块名
 from llm_client import llm_json, llm_chat, vision_batch  # noqa: E402
 import postprocess  # noqa: E402
 from doc_convert import _to_markdown, _web_to_markdown, _download_web_images  # noqa: E402

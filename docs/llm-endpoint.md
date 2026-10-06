@@ -40,6 +40,8 @@ LLM_API_KEY=whatever
 - `POST {base}/chat/completions` 可用（OpenAI 格式协议）
 - 图片内容参数（识图需要）：支持 `image_url` 类型的 content part（base64 data URL 形态）
 - 模型名：`SENSENOVA_MODEL` env 可配；不支持 `thinking` 参数的端点设 `LLM_OMIT_THINKING=1`
+- **网络**：LLM 调用直连端点（`llm_client` 不读 `HTTP_PROXY` 等代理 env）——机器需可直连
+  该端点；受限网络请用可直连的云端/国内端点，或自建本地代理形态（默认回落即此形态）
 
 ## 识图备选线路
 
