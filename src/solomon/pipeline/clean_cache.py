@@ -219,7 +219,7 @@ def _rebuild_tmp_index():
     try:
         subprocess.run([sys.executable, kb_script, "build"], env=env,
                        cwd=os.path.dirname(kb_script),
-                       capture_output=True, text=True, timeout=300)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     except Exception:  # noqa: BLE001
         pass
 

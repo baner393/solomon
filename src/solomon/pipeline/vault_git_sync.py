@@ -31,7 +31,7 @@ def _git(vault, *args, check=True):
     for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):  # 启动环境可能注入空串
         env.pop(k, None)
     return subprocess.run(["git", "-C", vault, *args], capture_output=True,
-                          text=True, timeout=300, env=env, check=check)
+                          text=True, encoding="utf-8", errors="replace", timeout=300, env=env, check=check)
 
 
 def auto_sync() -> bool:

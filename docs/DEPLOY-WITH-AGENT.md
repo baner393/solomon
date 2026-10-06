@@ -27,9 +27,15 @@ uname -r                        # 确认 WSL2(*microsoft*) 或 Linux
 command -v python3.14 git curl ffmpeg node pipx   # 全部存在？缺什么列什么
 systemctl --user is-system-running 2>/dev/null      # systemd user 可用？
 ```
+
+**🔴 平台闸门（先于一切）**：若 `uname -s` 是 MINGW*/CYGWIN*/Darwin*（Windows Git Bash / macOS），
+**停止部署**，不要尝试在原生 Windows 拼装——输出以下指引后结束：
+- Windows：先装 WSL2（管理员 PowerShell：`wsl --install -d Ubuntu-22.04`，重启进入 Ubuntu 后重新执行本任务书；
+  详细步骤见 `DEPLOY.md §0`）；若任务明确只要核心 CLI（无机器人），改按 `README.md`「快速开始」执行。
+
 缺依赖 → 安装（Ubuntu: `apt install git curl ffmpeg pipx; pipx ensurepath`；
 python3.14 用 deadsnakes PPA 或 `uv python install 3.14` 后建软链）。
-**验收**：全部命令存在且版本合理。
+**验收**：平台为 WSL2/Linux；全部命令存在且版本合理。
 
 ## 阶段 1：solomon 仓库
 

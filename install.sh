@@ -16,6 +16,22 @@ die() { echo -e "\033[1;31m❌ $*\033[0m"; exit 1; }
 ok()  { echo -e "\033[1;32m✓ $*\033[0m"; }
 
 say "① 环境检查"
+# ── 平台分流：本脚本只服务 Linux / WSL2 ──────────────────────────
+if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == CYGWIN* || "$(uname -s)" == Darwin* ]]; then
+  echo "❌ 当前环境不是 Linux/WSL（检测到 $(uname -s)）。"
+  echo ""
+  echo "solomon 完整系统（hermes 网关 + QQ/飞书/微信机器人）需要 WSL2 Ubuntu 或 Linux。"
+  echo ""
+  echo "  ▸ Windows 用户：先安装 WSL2（管理员 PowerShell 执行）："
+  echo "      wsl --install -d Ubuntu-22.04"
+  echo "    重启电脑 → 进入 Ubuntu → 再回到本目录重新运行：bash install.sh"
+  echo "    详细步骤（含 Python/基础工具）：DEPLOY.md §0"
+  echo ""
+  echo "  ▸ 只想要核心 CLI（文档入库/问答，Windows 原生实验性支持）："
+  echo "      不用本脚本，直接 pip install -e . && cp .env.example .env（填 LLM_BASE_URL/LLM_API_KEY）"
+  echo "      见 README.md「快速开始」。"
+  exit 1
+fi
 [[ "$(uname -r)" == *microsoft* || -d /run/systemd/system ]] || die "需要 WSL2(Ubuntu, systemd) 或 Linux"
 for cmd in git curl ffmpeg node;  do command -v $cmd >/dev/null || die "缺 $cmd（apt install $cmd）"; done
 command -v python3.14 >/dev/null || die "缺 python3.14（Ubuntu: deadsnakes PPA / 或用 uv python install 3.14）"

@@ -132,9 +132,8 @@ def _fetch_html(url: str, timeout: int = 60) -> str | None:
             proxies = {"http": v, "https": v}
             break
     if proxies is None:
-        # 主进程内直接调用时不经过 run() 的子进程代理注入：用默认代理兜底，
-        # 否则 coordinator 起的 ingest 进程无代理 env → 直连被墙/超时卡死（2026-09-14 实测）。
-        proxies = {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}
+        # 未配置 HTTP_PROXY 时直连（抓海外被墙站需在 .env 配 HTTP_PROXY）
+        proxies = None
 
     # 1) curl_cffi：浏览器 TLS/JA3 指纹，能过 Cloudflare 挑战
     try:
@@ -221,16 +220,17 @@ def _download_web_images(markdown_text: str, page_url: str, dest_dir: str) -> st
     def _dl(img_url: str) -> str | None:
         """下载图片到 dest_dir，返回落盘文件名；失败返回 None。"""
         try:
-            # 走代理（无代理 env 时用默认 127.0.0.1:7890，与 _fetch_html 一致）
+            # 走代理仅当配置了 HTTP_PROXY env；未配置直连（与 _fetch_html 一致）
             proxy = None
             for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
                 v = os.environ.get(var)
                 if v:
                     proxy = v
                     break
-            if proxy is None:
-                proxy = "http://127.0.0.1:7890"
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+            if proxy:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+            else:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             req = urllib.request.Request(_to_abs(img_url), headers={"User-Agent": "Mozilla/5.0"})
             with opener.open(req, timeout=20) as resp:
                 data = resp.read()

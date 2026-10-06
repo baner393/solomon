@@ -38,6 +38,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from urllib.parse import urlparse
 
 # ---- 路径配置 ----
 # 资产已从 skill 目录独立到 infra/assets（2026-09-12）：skill 未来清理/升级不影响入库。
@@ -63,7 +64,9 @@ from llm_client import llm_json, llm_chat, vision_batch  # noqa: E402
 import postprocess  # noqa: E402
 from doc_convert import _to_markdown, _web_to_markdown, _download_web_images  # noqa: E402
 
-PROXY = os.environ.get("HTTP_PROXY", "http://127.0.0.1:7890")
+# 出网代理（YouTube 等海外源；B站全程直连不受影响）。空串 = 直连。
+# 需要海外源时在 .env 配 HTTP_PROXY（如 http://127.0.0.1:7890）。
+PROXY = os.environ.get("HTTP_PROXY", "").strip()
 PYTHON = default_python()
 PYTHONPATH = default_pythonpath()
 
@@ -104,7 +107,7 @@ def run(cmd, timeout=1800, env_extra=None, check=False, bg=False, direct=False):
         for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
                   "all_proxy", "ALL_PROXY"):
             env.pop(k, None)
-    else:
+    elif PROXY:
         env.setdefault("http_proxy", PROXY)
         env.setdefault("https_proxy", PROXY)
     env.setdefault("PYTHONPATH", PYTHONPATH)
@@ -116,7 +119,7 @@ def run(cmd, timeout=1800, env_extra=None, check=False, bg=False, direct=False):
         return (0, f"后台启动 PID={p.pid}")
     try:
         p = subprocess.run(cmd, env=env, shell=isinstance(cmd, str),
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         out = (p.stdout or "") + (p.stderr or "")
         if check and p.returncode != 0:
             raise RuntimeError(f"命令失败({p.returncode}): {cmd}\n{out[-2000:]}")
@@ -153,10 +156,17 @@ def preflight(kind):
         ok(f"vault 可写: {VAULT}")
     else:
         bad(f"vault 不存在或不可写: {VAULT}")
-    if _tcp_ok(3456) or _tcp_ok(3458):
-        ok("SenseNova 代理可达（3456/3458）")
+    # LLM 端点：探配置的端点（LLM_BASE_URL/SENSENOVA_BASE_URL），未配置回落本地代理端口
+    ep_hit = None
+    for ep in llm_client._endpoints():
+        pr = urlparse(ep)
+        if _tcp_ok(pr.port or (443 if pr.scheme == "https" else 80), pr.hostname or "127.0.0.1"):
+            ep_hit = ep
+            break
+    if ep_hit:
+        ok(f"LLM 端点可达: {ep_hit}")
     else:
-        bad("SenseNova 代理不可达（127.0.0.1:3456/3458）— LLM 生成会失败")
+        bad(f"LLM 端点不可达（{' / '.join(llm_client._endpoints())}）— LLM 生成会失败")
 
     if kind == "video":
         for tool in ("yt-dlp", "ffmpeg", "ffprobe", "curl"):
@@ -164,10 +174,14 @@ def preflight(kind):
                 ok(f"{tool} 可用")
             else:
                 bad(f"{tool} 不可用")
-        if _tcp_ok(7890):
-            ok("下载代理 7890 可达")
+        if PROXY:
+            pr = urlparse(PROXY)
+            if _tcp_ok(pr.port or 80, pr.hostname or "127.0.0.1"):
+                ok(f"下载代理可达: {PROXY}")
+            else:
+                bad(f"下载代理不可达: {PROXY} — YouTube 等海外源会失败（B站不受影响）")
         else:
-            bad("下载代理 127.0.0.1:7890 不可达 — 视频下载/元数据会失败")
+            log("  ⚠ 未配置出网代理（HTTP_PROXY）——B站直连可用；YouTube 等海外源不可用")
         assets = ("whisper_cli.py", "video_keyframe_detector.py", "dhash_dedup.py")
         if os.path.isdir(SKILL_ASSETS):
             missing = [a for a in assets if not os.path.exists(os.path.join(SKILL_ASSETS, a))]
@@ -203,6 +217,9 @@ def preflight(kind):
 # ================= 输入形态识别 =================
 URL_RE = re.compile(r"^https?://", re.I)
 LOCAL_FILE_RE = re.compile(r"^(/|\./|\.\./|[A-Za-z]:[\\/]|~)")
+# 相对路径形态（带至少一级目录）：tests/x.md、docs/面试材料.md。
+# 单文件名（无 ./ 前缀、无目录）不算——避免把普通标题文本误判成文件。
+_REL_DOC_RE = re.compile(r"^(?:[^/:\\]+/)+[^/:\\]+\.(?:md|txt|docx?|pptx?|pdf|epub|xlsx?)$", re.I)
 # 视频域名：这些走视频 pipeline；其它 http(s) 视为网页正文（trafilatura 提取后文档入库）
 _VIDEO_HOSTS = (
     "bilibili.com", "b23.tv", "youtube.com", "youtu.be", "douyin.com", "ixigua.com",
@@ -220,13 +237,44 @@ def _is_video_url(url: str) -> bool:
 
 
 def _to_wsl_path(path):
-    """Windows 路径 → WSL 路径：D:\\foo\\bar.md → /mnt/d/foo/bar.md。非 Windows 路径原样返回。"""
+    """Windows 盘符路径归一化：
+    - WSL/Linux 环境（sys.platform != win32）：D:\\foo\\bar.md → /mnt/d/foo/bar.md
+    - 原生 Windows 环境：盘符路径原样保留（正斜杠化），不做 /mnt 转换
+    非 Windows 路径原样返回。"""
     m = re.match(r'^([A-Za-z]):[\\/](.*)$', path)
     if m:
         drive = m.group(1).lower()
         rest = m.group(2).replace('\\', '/')
+        if sys.platform == "win32":
+            return f"{drive}:/{rest}"
         return f"/mnt/{drive}/{rest}"
     return path.replace('\\', '/')
+
+
+def _find_by_name(root, name, maxdepth, timeout_s=15):
+    """按文件名浅层搜索。优先系统 find（Linux/WSL 快）；无 find（原生 Windows）
+    用 os.walk 限深限时。返回命中路径列表。"""
+    if shutil.which("find"):
+        try:
+            out = subprocess.run(
+                ["find", root, "-maxdepth", str(maxdepth), "-name", name, "-not", "-path", "*/.git/*"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s).stdout
+            return [l.strip() for l in out.splitlines() if l.strip()]
+        except Exception:  # noqa: BLE001 超时/失败就用已得结果继续
+            return []
+    hits, start = [], time.time()
+    for dirpath, dirnames, filenames in os.walk(root):
+        if time.time() - start > timeout_s:
+            break
+        rel = os.path.relpath(dirpath, root)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        if depth >= maxdepth:
+            dirnames[:] = []
+        if ".git" in dirnames:
+            dirnames.remove(".git")
+        if name in filenames:
+            hits.append(os.path.join(dirpath, name))
+    return hits
 
 
 def locate_missing_file(path):
@@ -249,13 +297,7 @@ def locate_missing_file(path):
     for root, depth in roots:
         if not os.path.isdir(root):
             continue
-        try:
-            out = subprocess.run(
-                ["find", root, "-maxdepth", str(depth), "-name", base, "-not", "-path", "*/.git/*"],
-                capture_output=True, text=True, timeout=15).stdout
-            hits += [l.strip() for l in out.splitlines() if l.strip()]
-        except Exception:  # noqa: BLE001 超时/失败就用已得结果继续
-            pass
+        hits += _find_by_name(root, base, depth)
     return list(dict.fromkeys(hits))
 
 
@@ -287,11 +329,11 @@ def classify_input(arg):
         path_like = arg
     if URL_RE.match(path_like):
         return ("url" if _is_video_url(path_like) else "web"), path_like
-    if LOCAL_FILE_RE.match(path_like):
+    if LOCAL_FILE_RE.match(path_like) or _REL_DOC_RE.match(path_like):
         wsl = _to_wsl_path(path_like)
         if os.path.isfile(wsl):
             return "file", wsl
-        # 盘符路径样但文件不存在 → 明确报错（原行为是下游 open 崩溃/静默中断）
+        # 路径样但文件不存在 → 明确报错（原行为是下游 open 崩溃/静默中断）
         return "file_missing", wsl
     # QQ/飞书分享卡片常把标题和短链拼成一段文本；不要将整段送入名称搜索。
     # 手打/部分分享是裸短链（无 scheme）：b23.tv/xxx、bilibili.com/video/BVxxx。
@@ -783,7 +825,7 @@ def fetch_video_metadata(url):
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     ]
     # B站直连（--proxy "" 覆盖 env 注入的代理）；YouTube 等海外源走 7890
-    cmd += ["--proxy", ""] if _is_bilibili_url(url) else ["--proxy", PROXY]
+    cmd += ["--proxy", ""] if _is_bilibili_url(url) else (["--proxy", PROXY] if PROXY else [])
     code, out = _run_ytdlp(cmd, url, timeout=120)
     # yt-dlp 可能一边打印元数据 JSON 一边因次要错误返回非零（如 mweb PO Token 警告），
     # 所以不看退出码，直接从输出里抓 JSON
@@ -824,7 +866,7 @@ def download_video(url, workdir):
         "--write-thumbnail", "--convert-thumbnails", "jpg",
         "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     ]
-    cmd += ["--proxy", ""] if _is_bilibili_url(url) else ["--proxy", PROXY]
+    cmd += ["--proxy", ""] if _is_bilibili_url(url) else (["--proxy", PROXY] if PROXY else [])
     code, out = _run_ytdlp(cmd, url, timeout=3600,
                            retry_extra=["-f", "18/best[ext=mp4]/b"])
     # 找到实际下载的视频文件（可能是 video.mp4 或 video.webm 等）
@@ -954,7 +996,7 @@ def get_subtitles(url, workdir, video_path):
            "--skip-download", "--no-playlist",
            "--user-agent", "Mozilla/5.0",
            "-o", os.path.join(workdir, "subs.%(ext)s")]
-    cmd += ["--proxy", ""] if _is_bilibili_url(url) else ["--proxy", PROXY]
+    cmd += ["--proxy", ""] if _is_bilibili_url(url) else (["--proxy", PROXY] if PROXY else [])
     cookie = os.environ.get("BILI_COOKIE", "").strip()
     if cookie:
         cmd += ["--add-headers", f"Cookie: {cookie}"]
@@ -2172,7 +2214,7 @@ def _rebuild_tmp_index():
     env["SOLOMON_FTS_DB"] = os.path.join(TEMP_ROOT, ".kb")
     try:
         p = subprocess.run([PYTHON, kb_script, "build"], env=env, cwd=os.path.dirname(kb_script),
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
         if p.returncode == 0:
             log("临时库索引更新: OK（TEMP_ROOT/.kb/kb_fts.db）")
         else:
@@ -2585,13 +2627,17 @@ def search_by_name(name):
     if not candidates:
         import subprocess as sp
         env = dict(os.environ)
-        env.setdefault("http_proxy", PROXY)
-        env.setdefault("https_proxy", PROXY)
+        if PROXY:
+            env.setdefault("http_proxy", PROXY)
+            env.setdefault("https_proxy", PROXY)
         try:
+            ytdlp_cmd = ["yt-dlp", "--flat-playlist", "--dump-single-json", "--no-playlist",
+                         f"ytsearch5:{name}"]
+            if PROXY:
+                ytdlp_cmd += ["--proxy", PROXY]
             p = sp.run(
-                ["yt-dlp", "--flat-playlist", "--dump-single-json", "--no-playlist",
-                 "--proxy", "http://127.0.0.1:7890", f"ytsearch5:{name}"],
-                capture_output=True, text=True, timeout=60, env=env,
+                ytdlp_cmd,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, env=env,
             )
             raw = p.stdout
             m = re.search(r"\{.*\}", raw, re.S)

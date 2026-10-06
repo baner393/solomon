@@ -26,7 +26,7 @@ import subprocess
 
 # ---- 路径 ----
 from _paths import default_vault  # noqa: E402
-from _paths import _PKG_ROOT  # noqa: E402
+from _paths import _PKG_ROOT, default_python  # noqa: E402
 
 VAULT = default_vault()
 VERIFY_SCRIPT = os.environ.get(
@@ -286,8 +286,8 @@ def step_verify(new_file):
         return None
     try:
         result = subprocess.run(
-            ["python3.14", VERIFY_SCRIPT, VAULT],
-            capture_output=True, text=True, timeout=300,
+            [default_python(), VERIFY_SCRIPT, VAULT],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
         )
     except subprocess.TimeoutExpired:
         log("⚠️ verify 超时（>300s），跳过")

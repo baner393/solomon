@@ -5,6 +5,69 @@
 
 ---
 
+## 0. 环境准备（含 WSL 安装）
+
+solomon 完整系统（含 hermes 网关与渠道）运行在 **Linux 环境**。Windows 用户需要先装 WSL2。
+
+### 0.1 判断你的环境
+
+- **Linux 用户**：跳过本节，直接进 §2。
+- **Windows 用户**：打开 PowerShell（普通权限即可）执行 `wsl --status`：
+  - 显示版本信息且默认版本为 2 → 已有 WSL，进 0.3；
+  - 提示「未安装」/ 命令不存在 → 按 0.2 安装。
+
+### 0.2 安装 WSL2（Windows 10 2004+ / Windows 11）
+
+以**管理员身份**打开 PowerShell，执行：
+
+```powershell
+wsl --install -d Ubuntu-22.04      # 一键安装 WSL2 + Ubuntu 22.04
+# wsl --list --online              # （可选）查看全部可安装发行版
+```
+
+安装完成后**重启电脑**，Ubuntu 首次启动会让你创建 Linux 用户名和密码（与 Windows 账户无关，记住密码即可，后面 sudo 要用）。
+
+确认 WSL2 生效（版本列应为 2）：
+
+```powershell
+wsl -l -v
+#   NAME            STATE           VERSION
+# * Ubuntu-22.04    Running         2
+```
+
+> 若 VERSION 是 1：管理员 PowerShell 执行 `wsl --set-version Ubuntu-22.04 2`。
+
+### 0.3 WSL 内基础工具
+
+进入 WSL（开始菜单点 Ubuntu，或任意终端执行 `wsl`），安装基础工具：
+
+```bash
+sudo apt update && sudo apt install -y git curl ffmpeg pipx
+pipx ensurepath && source ~/.bashrc
+```
+
+Python 3.14（管线生产验证版本；≥3.10 亦可跑）：
+
+```bash
+sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt install -y python3.14 python3.14-venv
+# 或用 uv：curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.14
+```
+
+> 💡 **把项目放进 WSL 自己的文件系统**（如 `~/solomon`），不要放 `/mnt/c/...`——
+> 跨文件系统 IO 慢 5-10 倍，且部分文件监听/权限行为不一致。
+
+### 0.4 路线选择
+
+| 路线 | 内容 | 适合 |
+|---|---|---|
+| **A. 核心 CLI** | `pip install -e .` + `.env` 配 LLM 端点 → `solomon ingest/ask`（见 [README 快速开始](README.md)） | 只要个人知识库 + 命令行问答 |
+| **B. 完整系统** | 路线 A 之上加 hermes 网关：QQ/飞书/微信 @ 机器人、确定性路由、会话续接、图文回复、学习路线自动沉淀、vault 自动备份（本文档 §3 起） | 要在聊天软件里用机器人 |
+
+路线 B 已含路线 A 的全部能力。**不要试图用裸装 hermes 拼装路线 B**——路由/续接/发图功能
+在锁定版本 + 补丁里（§4.1），版本不对整条链路残缺。
+
+---
+
 ## 1. 系统总览
 
 ```
@@ -209,6 +272,30 @@ hermes --profile solomon chat -Q -q "刚入库的视频讲了什么"  # ⑤ 问�
 hermes-agent 升级会**覆盖补丁**。流程：`git fetch && git checkout <新tag>` →
 `git apply --check ~/solomon/patches/gateway-route-patch.diff`（冲突则手工重放）→ 应用 → 重启网关。
 solomon 管线更新：`git -C ~/solomon pull`（补丁与管线解耦，互不影响）。
+
+### 辅助方案：LLM 能对话但不能识图
+
+**症状**：`solomon doctor` 全绿、问答正常，但 `--images` 入库时识图全部 `❌ 识图失败`。
+
+**原因**：solomon 默认用端点原生视觉（图片 base64 → OpenAI `image_url` 格式）。部分端点
+不接受 base64 data URL（只收公网图片 URL），或所选模型没有视觉能力。
+
+**方案 A（推荐）**：换支持标准 OpenAI 视觉格式的端点/模型（如 SenseNova 视觉系列、
+GPT-4o 系、Qwen-VL 系）。
+
+**方案 B**：切换「图床上传 → 公网 URL」备选线路（仓库自带脚本，需 node ≥18 + curl）：
+
+```bash
+# .env 追加一行（指向仓库内脚本），solomon 识图自动改走该脚本：
+FAST_VISION_JS=~/solomon/scripts/fast-vision.js
+```
+
+脚本行为：本地图片先上传到公共图床换取公网 URL，再以 `image_url` 传给端点。
+kimi 系模型自动改走 base64 直传（官方仅支持 base64）；其他模型可加 `--direct` 强制 base64。
+端点/密钥与主管线同源（读同一份 `.env` 的 `LLM_BASE_URL`/`LLM_API_KEY`）。
+独立测试：`node ~/solomon/scripts/fast-vision.js -p "图里有什么" <图片路径>`。
+
+**注意**：图床上传会把图片发到公共图床（uguu.se / temp.sh，短时效）——**敏感图片不要走方案 B**。
 
 ### 备份
 vault 是 git 仓库：加 `origin remote` 后系统自动推送（事件驱动 + 每日兜底）。

@@ -32,7 +32,7 @@ def split_audio(audio_path, chunk_seconds=1800):
             "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
             chunk_path
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         
         if os.path.exists(chunk_path) and os.path.getsize(chunk_path) > 0:
             chunks.append((chunk_path, start))

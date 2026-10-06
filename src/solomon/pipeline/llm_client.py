@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-llm_client.py — SenseNova 调用封装（文本 / JSON schema 约束 / 识图）
+llm_client.py — LLM 调用封装（文本 / JSON schema 约束 / 识图）
 
-走本地 4Key 轮换代理（OpenAI 兼容 /v1/chat/completions）：
-  代理：127.0.0.1:3456（或 3458，fallback）
-  model：sensenova-6.8-flash-lite
-  auth ：Bearer proxy（fast-vision.js 同款）
+OpenAI 兼容端点（/v1/chat/completions）：
+  端点：LLM_BASE_URL env 优先（兼容 SENSENOVA_BASE_URL）——云端直连（如
+        https://token.sensenova.cn/v1）或任意 OpenAI 兼容服务；
+        未配置时回落本地 4Key 轮换代理（127.0.0.1:3456 主 / 3458 备）。
+  key  ：LLM_API_KEY env（兼容 SENSENOVA_API_KEY）；本地代理默认 "proxy"。
+  model：SENSENOVA_MODEL env，默认 sensenova-6.8-flash-lite。
 
 用法：
     from llm_client import llm_chat, llm_json
@@ -16,10 +18,11 @@ llm_client.py — SenseNova 调用封装（文本 / JSON schema 约束 / 识图�
 识图（视频关键帧逐张串行）：
     from llm_client import vision_analyze
     desc = vision_analyze("/path/frame.jpg", "这是什么界面？")
-
-⚠️ 识图必须逐张串行调用（一次一张），并发会打崩代理。已在函数内强制串行信号。
+    默认走端点原生视觉（本地图片 base64 → OpenAI image_url 格式，无需额外依赖）；
+    设置 FAST_VISION_JS 时走 node 脚本旧链路（图床→视觉，兼容保留）。
 """
 
+import base64
 import json
 import os
 import re
@@ -27,39 +30,82 @@ import socket
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 
 # ---- 配置 ----
-PROXY_PORTS = [3456, 3458]          # 4Key 轮换代理端口（3456 主，3458 备）
-PROXY_TOKEN = "proxy"
+def _endpoints():
+    """LLM 端点列表（按序 fallback）。云端/自定义端点只一个；本地代理 3456→3458。"""
+    base = (os.environ.get("LLM_BASE_URL") or os.environ.get("SENSENOVA_BASE_URL") or "").strip()
+    if base:
+        return [base.rstrip("/")]
+    return ["http://127.0.0.1:3456/v1", "http://127.0.0.1:3458/v1"]
+
+
+API_KEY = (os.environ.get("LLM_API_KEY") or os.environ.get("SENSENOVA_API_KEY") or "proxy").strip()
 MODEL = os.environ.get("SENSENOVA_MODEL", "sensenova-6.8-flash-lite")
 TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "180"))
-
-VISION_SCRIPT = os.environ.get(
-    "FAST_VISION_JS",
-    "/mnt/c/Users/ban/.zcode/workspace/default/fast-vision.js",
-)
 NODE = os.environ.get("NODE_BIN", "node")
 
+# SenseNova 系端点需显式禁思维链（reasoning 挤占 max_tokens 致长 JSON content 为空）。
+# 标准 OpenAI 端点若对未知字段报错，设 LLM_OMIT_THINKING=1 移除该参数。
+_OMIT_THINKING = os.environ.get("LLM_OMIT_THINKING", "").strip() in ("1", "true", "yes")
 
-def _http_json(method, path, body, port, timeout=TIMEOUT):
-    """向代理发 HTTP 请求（纯 stdlib，不依赖 requests）"""
+
+def _connect(url, timeout):
+    """按端点 URL 建 http/https 连接。"""
     import http.client
-    host = "127.0.0.1"
-    conn = http.client.HTTPConnection(host, port, timeout=timeout)
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {PROXY_TOKEN}",
-    }
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    conn.request(method, path, body=data, headers=headers)
-    resp = conn.getresponse()
-    raw = resp.read().decode("utf-8", errors="replace")
-    conn.close()
-    return raw
+    pr = urlparse(url)
+    if pr.scheme == "https":
+        return http.client.HTTPSConnection(pr.hostname, pr.port or 443, timeout=timeout)
+    return http.client.HTTPConnection(pr.hostname, pr.port or 80, timeout=timeout)
 
 
-def _chat(messages, temperature=0.3, port=None, max_tokens=4096, timeout=TIMEOUT, stream=False, out=None):
-    """调 chat/completions。按端口顺序尝试，失败切换下一端口。
+def _request(method, url, body, timeout=TIMEOUT, stream_out=None):
+    """向端点发请求（纯 stdlib）。stream_out 非空时走 SSE 逐 token 写入，返回完整内容。
+
+    返回 (content_or_None, raw_or_err)。stream 模式只返回第一个元组。
+    """
+    path = urlparse(url).path or "/"
+    conn = _connect(url, timeout)
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {API_KEY}",
+        }
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        conn.request(method, path, body=data, headers=headers)
+        resp = conn.getresponse()
+        if stream_out is None:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return None, raw
+        # SSE 流式：逐 data: 行解析 delta，写到 stream_out（flush）
+        content = ""
+        for line in resp:
+            line = line.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            d = line[5:].strip()
+            if d == "[DONE]":
+                break
+            try:
+                obj = json.loads(d)
+                delta = (obj.get("choices", [{}])[0].get("delta", {}) or {}).get("content", "")
+            except (json.JSONDecodeError, IndexError, TypeError, AttributeError):
+                delta = ""
+            if delta:
+                content += delta
+                stream_out.write(delta)
+                stream_out.flush()
+        if content and not content.endswith("\n"):
+            stream_out.write("\n")
+            stream_out.flush()
+        return content, ""
+    finally:
+        conn.close()
+
+
+def _chat(messages, temperature=0.3, max_tokens=4096, timeout=TIMEOUT, stream=False, out=None):
+    """调 chat/completions。按端点列表顺序尝试，失败切换下一个。
 
     stream=True 时走 SSE 流式，逐 token 写到 out（默认 stdout），同时返回完整内容。
     """
@@ -69,64 +115,30 @@ def _chat(messages, temperature=0.3, port=None, max_tokens=4096, timeout=TIMEOUT
         "stream": bool(stream),
         "temperature": temperature,
         "max_tokens": max_tokens,
-        # SenseNova 默认带思维链（reasoning），会挤占 max_tokens 导致长 JSON 的
-        # content 为空/截断。知识库生成场景只需结果，显式禁用。
-        "thinking": {"type": "disabled"},
     }
-    ports = [port] if port else PROXY_PORTS
+    if not _OMIT_THINKING:
+        body["thinking"] = {"type": "disabled"}
+    urls = _endpoints()
     last_err = None
-    for p in ports:
+    for base in urls:
+        url = base.rstrip("/") + "/chat/completions"
         try:
             if stream:
-                content = _chat_stream(body, p, timeout, out or sys.stdout)
+                content, _ = _request("POST", url, body, timeout=timeout, stream_out=out or sys.stdout)
                 if content:
                     return content
-                last_err = f"port{p} 流式空响应"
+                last_err = f"{url} 流式空响应"
             else:
-                raw = _http_json("POST", "/v1/chat/completions", body, p, timeout=timeout)
+                _, raw = _request("POST", url, body, timeout=timeout)
                 data = json.loads(raw)
                 content = data.get("choices", [{}])[0].get("message", {}).get("content")
                 if content:
                     return content.strip()
-                last_err = f"port{p} 空响应: {raw[:200]}"
+                last_err = f"{url} 空响应: {raw[:200]}"
         except Exception as e:
-            last_err = f"port{p} {e}"
+            last_err = f"{url} {e}"
             continue
-    raise RuntimeError(f"LLM 调用失败（所有端口）: {last_err}")
-
-
-def _chat_stream(body, port, timeout, out):
-    """SSE 流式调用：逐 token 写 out（flush），返回完整内容。"""
-    import http.client
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    conn.request(
-        "POST", "/v1/chat/completions",
-        body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {PROXY_TOKEN}"},
-    )
-    resp = conn.getresponse()
-    content = ""
-    for line in resp:
-        line = line.decode("utf-8", errors="replace").strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            break
-        try:
-            obj = json.loads(data)
-            delta = (obj.get("choices", [{}])[0].get("delta", {}) or {}).get("content", "")
-        except (json.JSONDecodeError, IndexError, TypeError, AttributeError):
-            delta = ""
-        if delta:
-            content += delta
-            out.write(delta)
-            out.flush()
-    conn.close()
-    if content and not content.endswith("\n"):
-        out.write("\n")
-        out.flush()
-    return content
+    raise RuntimeError(f"LLM 调用失败（所有端点）: {last_err}")
 
 
 def llm_chat(system, user, temperature=0.3, max_tokens=4096, timeout=TIMEOUT, stream=False):
@@ -255,19 +267,32 @@ def llm_json(system, user, schema_prompt, temperature=0.1, max_retries=3, option
     raise RuntimeError(f"JSON 校验失败（重试 {max_retries} 次）: {last_err}\n原始输出: {raw[:500]}")
 
 
-def vision_analyze(image_path, prompt="请描述这张图片的内容", timeout=TIMEOUT, max_retries=2):
-    """识图：复用 fast-vision.js（上传图床→SenseNova 视觉）。逐张串行。
+def _vision_native(image_path, prompt, timeout=TIMEOUT):
+    """端点原生视觉：本地图片 base64 → OpenAI image_url 格式（无需 node/图床）。"""
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    ext = os.path.splitext(image_path)[1].lower().lstrip(".")
+    mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{b64}"}},
+        ],
+    }]
+    return _chat(messages, temperature=0.2, max_tokens=1024, timeout=timeout)
 
-    失败自愈：API 错误/网络错误/图床失败时重试（默认 2 次），
-    全部失败返回 '❌ 识图失败' 前缀，调用方据此标记"未验证"而非丢弃。
-    """
+
+def _vision_node(script, image_path, prompt, timeout=TIMEOUT, max_retries=2):
+    """node 脚本旧链路（fast-vision.js：上传图床→SenseNova 视觉），FAST_VISION_JS 显式启用。"""
     import subprocess
-    cmd = [NODE, VISION_SCRIPT, "-p", prompt, image_path]
+    cmd = [NODE, script, "-p", prompt, image_path]
     last_err = ""
     for attempt in range(max_retries + 1):
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout
+                cmd, capture_output=True, text=True, timeout=timeout,
+                encoding="utf-8", errors="replace",
             )
         except subprocess.TimeoutExpired:
             last_err = "超时"
@@ -278,6 +303,30 @@ def vision_analyze(image_path, prompt="请描述这张图片的内容", timeout=
         if result.returncode == 0 and out and "❌" not in out and "error" not in out.lower():
             return out
         last_err = out[:100] if out else result.stderr.strip()[:100]
+        if attempt < max_retries:
+            time.sleep(1.5)
+    return f"❌ 识图失败({last_err}): {os.path.basename(image_path)}"
+
+
+def vision_analyze(image_path, prompt="请描述这张图片的内容", timeout=TIMEOUT, max_retries=2):
+    """识图：默认走端点原生视觉（base64 image_url，零外部依赖）；
+    设置 FAST_VISION_JS 时走 node 脚本旧链路（图床→视觉，兼容保留）。
+
+    失败自愈：API 错误/网络错误时重试（默认 2 次），
+    全部失败返回 '❌ 识图失败' 前缀，调用方据此标记"未验证"而非丢弃。
+    """
+    script = os.environ.get("FAST_VISION_JS", "").strip()
+    if script:
+        return _vision_node(script, image_path, prompt, timeout, max_retries)
+    last_err = ""
+    for attempt in range(max_retries + 1):
+        try:
+            out = _vision_native(image_path, prompt, timeout).strip()
+            if out and "❌" not in out:
+                return out
+            last_err = out[:100] if out else "空响应"
+        except Exception as e:  # noqa: BLE001 网络/端点错误统一重试
+            last_err = str(e)[:100]
         if attempt < max_retries:
             time.sleep(1.5)
     return f"❌ 识图失败({last_err}): {os.path.basename(image_path)}"

@@ -117,14 +117,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         check("sherpa-onnx", False, "转写引擎：pip install sherpa-onnx（可选，无则回退 whisper）")
 
     print("── LLM 端点检查 ──")
-    endpoint = os.environ.get("SENSENOVA_BASE_URL") or os.environ.get("LLM_BASE_URL", "http://127.0.0.1:3458/v1")
-    api_key = os.environ.get("SENSENOVA_API_KEY") or os.environ.get("LLM_API_KEY", "proxy")
-    check(f"LLM base_url={endpoint} (SENSENOVA_BASE_URL/LLM_BASE_URL 可改)", True)
+    # 与 llm_client 同源解析（LLM_BASE_URL/SENSENOVA_BASE_URL → 本地代理回落），避免 doctor 与实际调用错位
+    from solomon.pipeline.llm_client import _endpoints, API_KEY as _api_key, MODEL as _model
+    endpoint = _endpoints()[0]
+    api_key = _api_key
+    check(f"LLM base_url={endpoint} (LLM_BASE_URL/SENSENOVA_BASE_URL 可改)", True)
     try:
         import json as _json
         import urllib.request
         body = _json.dumps({
-            "model": "sensenova-6.8-flash-lite",
+            "model": _model,
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 5,
         }).encode()

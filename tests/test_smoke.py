@@ -93,6 +93,65 @@ class TestClassifyInput:
         assert ingest._to_wsl_path("D:/foo/bar.md") == "/mnt/d/foo/bar.md"
         assert ingest._to_wsl_path("/mnt/c/x.md") == "/mnt/c/x.md"
 
+    def test_wsl_path_native_windows(self, monkeypatch):
+        """原生 Windows 平台（sys.platform=win32）：盘符路径不再转 /mnt。"""
+        sys.path.insert(0, str(SRC / "solomon" / "pipeline"))
+        import ingest
+
+        monkeypatch.setattr(ingest.sys, "platform", "win32")
+        assert ingest._to_wsl_path("C:\\Users\\t\\x.md") == "c:/Users/t/x.md"
+
+    def test_relative_doc_path_exists(self, tmp_path, monkeypatch):
+        """相对路径（带目录）且文件存在（相对 cwd）→ file。"""
+        d = tmp_path / "docs"
+        d.mkdir()
+        (d / "x.md").write_text("# t", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        kind, val = self._classify("docs/x.md")
+        assert kind == "file"
+        assert val.endswith("x.md")
+
+    def test_relative_doc_path_missing(self):
+        """相对路径但文件不存在 → file_missing（绝不掉进名称搜索）。"""
+        kind, _ = self._classify("tests/不存在的文档xyz.md")
+        assert kind == "file_missing"
+
+    def test_plain_name_not_file(self):
+        """单文件名（无目录、无 ./ 前缀）不判文件——避免把标题文本误判。"""
+        kind, _ = self._classify("面试材料.md")
+        assert kind == "name"
+
+
+class TestLlmEndpoints:
+    """LLM 端点配置解析：云端 env 优先，未配置回落本地代理。"""
+
+    def _llm(self):
+        sys.path.insert(0, str(SRC / "solomon" / "pipeline"))
+        import llm_client
+        return llm_client
+
+    def test_default_fallback_local_proxy(self, monkeypatch):
+        for k in ("LLM_BASE_URL", "SENSENOVA_BASE_URL"):
+            monkeypatch.delenv(k, raising=False)
+        eps = self._llm()._endpoints()
+        assert eps == ["http://127.0.0.1:3456/v1", "http://127.0.0.1:3458/v1"]
+
+    def test_cloud_endpoint_env(self, monkeypatch):
+        monkeypatch.setenv("LLM_BASE_URL", "https://token.sensenova.cn/v1")
+        assert self._llm()._endpoints() == ["https://token.sensenova.cn/v1"]
+
+    def test_sensenova_alias_env(self, monkeypatch):
+        monkeypatch.setenv("SENSENOVA_BASE_URL", "https://api.example.com/v1 ")
+        assert self._llm()._endpoints() == ["https://api.example.com/v1"]
+
+    def test_api_key_default_proxy(self, monkeypatch):
+        import importlib
+        for k in ("LLM_API_KEY", "SENSENOVA_API_KEY"):
+            monkeypatch.delenv(k, raising=False)
+        llm = self._llm()
+        importlib.reload(llm)
+        assert llm.API_KEY == "proxy"
+
 
 # ═══════════════════════════════════════════════════════════
 # 3. FTS5 索引隔离 + 检索（用临时 vault 建库）
