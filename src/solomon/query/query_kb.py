@@ -91,7 +91,7 @@ def gather_evidence(question, top_n=5, category=None, scope="all"):
     return merged[:1] + rest
 
 
-def read_page_content(path, tag="main"):
+def read_page_content(path, tag="main", limit=3000):
     """读页面正文（去 frontmatter），限制长度。tag='tmp' 读临时学习区。"""
     root = TEMP_ROOT if tag == "tmp" else VAULT
     abs_path = os.path.join(root, path)
@@ -100,7 +100,7 @@ def read_page_content(path, tag="main"):
     with open(abs_path, encoding="utf-8") as f:
         text = f.read()
     text = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.S)
-    return text[:3000]  # 每页最多 3000 字
+    return text if limit is None else text[:limit]  # limit=None 全文（配图收集用）
 
 
 # ================= 图文回答（命中页面配图 → LLM 引用 → 渠道 MEDIA: 发图） =================
@@ -144,7 +144,7 @@ def _collect_page_images(hits, max_images=12):
     idx = _vault_image_index()
     out, seen = [], set()
     for path, cat, title, snippet, rank, tag in hits:
-        body = read_page_content(path, tag)
+        body = read_page_content(path, tag, limit=None)  # 全文扫 embed（长页配图不再漏）
         lines = body.splitlines()
         for i, line in enumerate(lines):
             m = _EMBED_RE.search(line)

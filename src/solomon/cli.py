@@ -73,7 +73,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     # 空 index/log 骨架
     index = vault / "index.md"
     if not index.exists():
-        index.write_text("# 知识库索引\n\n<!-- Total pages 由 postprocess 自动维护 -->\n", encoding="utf-8")
+        index.write_text("# 知识库索引\n\n<!-- Total pages 由 postprocess 自动维护 -->\n\nTotal pages: 0\n", encoding="utf-8")
     log = vault / "log.md"
     if not log.exists():
         log.write_text("# 入库日志\n\n", encoding="utf-8")
@@ -135,7 +135,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             data=body,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=10) as r:
+        _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 直连，与 llm_client 一致
+        with _opener.open(req, timeout=10) as r:
             check(f"LLM 端点连通（chat/completions HTTP {r.status}）", True)
     except Exception as e:
         check("LLM 端点连通", False, f"无法连接 {endpoint}: {e}. 请确认本地 SenseNova 代理或改 LLM_BASE_URL")
@@ -158,6 +159,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 # ── ingest：入库 ───────────────────────────────────────────────
 def cmd_ingest(args: argparse.Namespace) -> int:
+    if not (args.input or args.name or args.text or args.from_notes):
+        print("用法：solomon ingest <URL | 文件路径 | 文本> [--images] [--force]")
+        print("示例：solomon ingest https://www.bilibili.com/video/BVxxx")
+        print("      solomon ingest docs/笔记.md")
+        print("      solomon ask \"问题\"        # 知识库问答")
+        return 1
     # 先确保 vault/work 存在（等价于隐式 init；preflight 的写检查随后照常执行）
     config.ensure_dirs()
     argv: list[str] = []
@@ -314,7 +321,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--execute", action="store_true", help="真实删除（默认 dry-run 预览）")
     p_clean.set_defaults(fn=cmd_clean_cache)
 
-    p_index = sub.add_parser("index", help="FTS5 索引维护")
+    p_index = sub.add_parser("index", help="FTS5 索引维护（update=增量加新页；build=全量重建，查询 0 命中/索引异常时用）")
     p_index.add_argument("action", choices=["update", "build"], default="update", nargs="?")
     p_index.set_defaults(fn=cmd_index)
 

@@ -79,10 +79,17 @@ def delete_page(target: str, dry_run: bool = False) -> bool:
         for extra in pages[1:]:
             _log(f"  （也匹配: {os.path.relpath(extra, VAULT)}）")
     else:
+        # 目标全无（页/标题都匹配不到）：明确报未找到，不再伪装「删除完成」
+        # （2026-10-06 测试：删不存在的标题曾报 ✅ exit 0）。半删场景（raw 在页不在）
+        # 由下方关联物检查兜底：有任何关联物仍继续清理。
+        import glob as _glob
+        raw_left = _glob.glob(os.path.join(VAULT, "raw", "articles", f"*{stem}*")) if stem else []
+        if not raw_left:
+            _log(f"❌ 未找到该笔记: {target}")
+            return False
         page = None
         title = stem
         subdir = "concepts"
-        # 页文件不存在（可能已被移走/半删）：仍继续清理 raw/assets/index/log/FTS
         _log(f"删除笔记: {title}（页文件未找到，继续清理关联物）")
 
     deleted_any = False

@@ -116,10 +116,19 @@ class TestClassifyInput:
         kind, _ = self._classify("tests/不存在的文档xyz.md")
         assert kind == "file_missing"
 
-    def test_plain_name_not_file(self):
-        """单文件名（无目录、无 ./ 前缀）不判文件——避免把标题文本误判。"""
-        kind, _ = self._classify("面试材料.md")
-        assert kind == "name"
+    def test_doc_ext_never_name_search(self):
+        """带 .md 扩展名但文件不存在 → file_missing（绝不掉名称搜索自动入库，
+        2026-10-06 全量测试教训：no_such_file.md 曾自动入库不相关视频）。"""
+        kind, val = self._classify("面试材料.md")
+        assert kind == "file_missing"
+
+    def test_doc_ext_single_name_exists(self, tmp_path, monkeypatch):
+        """单文件名（无目录）且相对 cwd 存在 → file。"""
+        (tmp_path / "README.md").write_text("# t", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        kind, val = self._classify("README.md")
+        assert kind == "file"
+        assert val.endswith("README.md")
 
 
 class TestLlmEndpoints:
@@ -170,6 +179,33 @@ class TestPreflight:
         monkeypatch.setattr(ingest, "_tcp_ok", lambda *a, **k: True)
         # 不抛 SystemExit / NameError 即通过
         ingest.preflight("doc")
+
+
+class TestCrossValidateFrames:
+    """交叉验证帧名双格式（2026-10-06 P0：code_* 毫秒帧名走 m=None 分支曾崩，
+    任何 B站视频 --images 必崩）。"""
+
+    def test_ms_and_hms_frame_names(self, tmp_path):
+        import json
+        sys.path.insert(0, str(SRC / "solomon" / "pipeline"))
+        import ingest
+
+        subs = tmp_path / "subtitles.json"
+        subs.write_text(
+            '[{"start": 2.0, "end": 4.0, "text": "前段"}, {"start": 29.0, "end": 32.0, "text": "后段"}]',
+            encoding="utf-8",
+        )
+        kf = tmp_path / "kf"
+        kf.mkdir()
+        (kf / "code_00003599_4b21efed.jpg").write_bytes(b"x")   # 毫秒格式 → 3.599s
+        (kf / "keyframes_001_00:00:31.jpg").write_bytes(b"x")   # HH:MM:SS 格式
+        out = ingest.cross_validate_modalities(str(tmp_path), str(subs), str(kf), "知识讲解")
+        assert out, "应产出 alignment.json"
+        with open(out, encoding="utf-8") as f:
+            data = json.load(f)
+        ts = {r["frame"]: r["ts"] for r in data}
+        assert ts["code_00003599_4b21efed.jpg"] == "00:00:03"   # 毫秒帧 ts 正确还原
+        assert ts["keyframes_001_00:00:31.jpg"] == "00:00:31"
 
 
 # ═══════════════════════════════════════════════════════════

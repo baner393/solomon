@@ -74,6 +74,8 @@ def _web_to_markdown(url: str, timeout: int = 60) -> str | None:
 
 def _web_to_markdown_impl(url: str, timeout: int = 60) -> str | None:
     if trafilatura is None and MarkItDown is None:
+        print("[doc_convert] ❌ 缺依赖：pip install trafilatura markitdown（网页/文档解析需要，"
+              "pip install -e . 已含）", file=sys.stderr)
         return None
     try:
         html = _fetch_html(url, timeout=timeout)

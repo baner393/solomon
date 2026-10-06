@@ -165,7 +165,8 @@ def preflight(kind):
             ep_hit = ep
             break
     if ep_hit:
-        ok(f"LLM 端点可达: {ep_hit}")
+        _env_url = (os.environ.get("LLM_BASE_URL") or os.environ.get("SENSENOVA_BASE_URL") or "").strip()
+        ok(f"LLM 端点可达: {ep_hit}" + ("" if _env_url else "（默认本地代理；云端请配 LLM_BASE_URL）"))
     else:
         bad(f"LLM 端点不可达（{' / '.join(llm_client._endpoints())}）— LLM 生成会失败")
 
@@ -357,6 +358,13 @@ def classify_input(arg):
             ("\\" in arg or arg.count("/") >= 2)
             and re.search(r"\.(md|txt|docx?|pptx?|pdf|epub|xlsx?)\s*$", arg, re.I)):
         return "file_missing", path_like
+    # 带 .md 等文档扩展名但前面没匹配到存在的文件 → file_missing（2026-10-06 测试：
+    # no_such_file.md 曾落名称搜索并自动入库不相关视频）。file_missing 有
+    # locate_missing_file 自动定位兜底，比名称搜索安全得多。
+    if re.search(r"\.(md|txt|docx?|pptx?|pdf|epub|xlsx?)\s*$", arg, re.I):
+        if os.path.isfile(arg):
+            return "file", arg
+        return "file_missing", arg
     return "name", arg
 
 
@@ -515,7 +523,8 @@ def cross_validate_modalities(workdir, subs_path, kf_dir, video_type, max_subs_p
         hits.sort(key=lambda it: min(it[1], hi) - max(it[0], lo), reverse=True)
         records.append({
             "frame": fn,
-            "ts": f"{m.group(1)}:{m.group(2)}:{m.group(3)}",
+            # 两种帧名统一从秒数还原（m 在 code_* 毫秒帧名下为 None，2026-10-06 P0）
+            "ts": f"{t // 3600:02d}:{t % 3600 // 60:02d}:{t % 60:02d}",
             "window": [before, after],
             "subtitles": [{"start": round(st, 1), "text": txt} for st, en, txt in hits[:max_subs_per_frame]],
         })
@@ -1547,7 +1556,7 @@ def llm_generate_notes(workdir, video_title, transcription_path, vision_path, kf
 视频标题：{video_title}
 {translation_block}{part_head}要求：
 {template_block}1. 按教学逻辑组织为多个 section（每节含 heading、正文 body）。
-2. 图文结合：每节可引用一张最相关的关键帧图。image_ref 必须且只能填下方「关键帧清单」中的真实文件名（含冒号，如 keyframes_001_00:00:01.jpg），严禁编造不存在的文件名；没有合适的图则填 null。
+2. 图文结合：每节可引用一张最相关的关键帧图。image_ref 必须且只能填下方「关键帧清单」中的真实文件名（照抄清单原样，严禁编造）；没有合适的图则填 null。
 3. image_note 填教学说明（1-2 句，写「读者从图里学到什么」，不要写「图里画了什么」）；无图时填 null。
 4. 末尾 summary 总结核心知识点。
 {signal_req}{align_req}
@@ -1646,7 +1655,7 @@ def _raw_link_block(title: str, sources: str, raw_rel) -> str:
                     head = f.read(2000)
                 m = re.search(r"source_url:\s*(\S+)", head)
                 if m:
-                    ext = m.group(1).strip()
+                    ext = m.group(1).strip().strip('"\'')
             except OSError:
                 pass
     if ext:
@@ -2848,9 +2857,16 @@ if __name__ == "__main__":
         import traceback
         tb = traceback.format_exc()
         log(f"❌ 入库异常终止: {type(e).__name__}: {e}")
-        log("❌ 完整堆栈见 stderr 落盘日志（/tmp/ingest_stderr_*.log）")
-        sys.stderr.write(tb)
-        sys.stderr.flush()
+        try:
+            with open("/tmp/solomon_ingest_traceback_last.log", "w", encoding="utf-8") as f:
+                f.write(tb)
+            log("❌ 完整堆栈: /tmp/solomon_ingest_traceback_last.log（排查用；SOLOMON_DEBUG=1 可直接打印）")
+        except OSError:
+            sys.stderr.write(tb)
+            sys.stderr.flush()
+        if os.environ.get("SOLOMON_DEBUG"):
+            sys.stderr.write(tb)
+            sys.stderr.flush()
         sys.exit(1)
     finally:
         _auto_profile_sync()

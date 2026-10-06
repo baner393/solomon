@@ -33,7 +33,8 @@ solomon ask "RAG 是什么"         # 知识库问答
 ```bash
 # 0. 前置：Python ≥ 3.10；视频入库另需 yt-dlp + ffmpeg（纯文档/问答不需要）
 
-# 1. 安装
+# 1. 安装（推荐 venv；Ubuntu 23.04+ 直接 pip 会报 externally-managed-environment）
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .          # 或 uv sync（推荐）
 # 注：当前版本 pip 会一并安装视频管线依赖（faster-whisper/opencv 等，下载约 700MB，
 # 慢网需耐心）。纯文档/问答用户也建议直接装——暂无最小安装分组。

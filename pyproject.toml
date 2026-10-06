@@ -25,6 +25,9 @@ dependencies = [
     "sherpa-onnx>=1.10",
     "requests>=2.31",
     "python-dotenv>=1.0",
+    "trafilatura>=1.8",
+    "markitdown>=0.1",
+    "curl_cffi>=0.7",
 ]
 
 [project.optional-dependencies]

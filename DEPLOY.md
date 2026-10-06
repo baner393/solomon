@@ -53,6 +53,10 @@ sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt install -y python3.14 
 # 或用 uv：curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.14
 ```
 
+> 💡 **PEP 668 提醒（Ubuntu 23.04+）**：直接 `pip install` 会报 `externally-managed-environment`。
+> 一律用 venv（路线 A：`python3 -m venv .venv && source .venv/bin/activate`）或 pipx/uv——
+> **不要**用 `--break-system-packages` 硬装进系统。
+
 > 💡 **把项目放进 WSL 自己的文件系统**（如 `~/solomon`），不要放 `/mnt/c/...`——
 > 跨文件系统 IO 慢 5-10 倍，且部分文件监听/权限行为不一致。
 

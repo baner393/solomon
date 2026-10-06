@@ -242,7 +242,8 @@ def step_index(new_file, page_title, category):
         if m:
             n = int(m.group(1)) + 1
             return text.replace(m.group(0), f"Total pages: {n}", 1)
-        return text
+        # 旧库无该行（init 模板缺失时代）→ 初始化，修「Total pages 永不出现」
+        return text.rstrip("\n") + "\n\nTotal pages: 1\n"
 
     lines.insert(insert_idx, entry)
     content = bump_total("\n".join(lines))
