@@ -1,7 +1,7 @@
 /**
  * DeepSeek 多 Key 轮换代理 - 极简版
  *
- * ⚠️ 修改前请阅读：C:\Users\ban\.zcode\v2\PROXY-GUIDE.md
+ * ⚠️ 修改前请先备份原文件；密钥占位符 SK_YOUR_KEY_* 替换为真实 key
  *
  * 纯轮换转发，无队列、无重试、无多余监听器
  * 一个 Key 限流 → 换下一个

@@ -1,7 +1,7 @@
 /**
  * SenseNova 智能限流代理 - 多 Key 轮换 + 多模型独立冷却 + 队列
  *
- * ⚠️ 修改前请阅读：C:\Users\ban\.zcode\v2\PROXY-GUIDE.md
+ * ⚠️ 修改前请先备份原文件；密钥占位符 SK_YOUR_KEY_* 替换为真实 key
  *
  * GLM-5.2 限额严重，需要排队和冷却管理，不能简单透传
  * 特性：

@@ -11,7 +11,7 @@
  *    若按 60s 短冷却处理会在所有 Key 上空转轮满后误报"所有 Key 限流"
  * 3. 401/403 视为无权限，长冷却避免反复消耗配额
  *
- * ⚠️ 修改前请阅读：C:\Users\ban\.zcode\v2\PROXY-GUIDE.md
+ * ⚠️ 修改前请先备份原文件；密钥占位符 SK_YOUR_KEY_* 替换为真实 key
  */
 const http = require('http');
 const https = require('https');
