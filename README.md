@@ -28,6 +28,56 @@ solomon ask "RAG 是什么"         # 知识库问答
 - **转写无 torch**：主引擎 sherpa-onnx SenseVoice（int8，CPU 高效），不需要 GPU/大模型栈
 - **知识库用 Obsidian 格式**：产物是标准 markdown + wikilink，vault 可被 Obsidian 直接打开
 
+## 功能特性
+
+### 📥 入库与知识构建（一条命令进知识库）
+
+| 来源 | 命令示例 |
+|---|---|
+| B站/YouTube 视频（合集/分P/配图） | `solomon ingest "https://www.bilibili.com/video/BVxxx"` |
+| **飞书文档**（wiki/docx 链接，开放 API 读取，不撞登录墙） | `solomon ingest "https://xxx.feishu.cn/wiki/xxxx"` |
+| 本地文件（md/pdf/docx/xlsx/html/epub） | `solomon ingest docs/笔记.md` |
+| 网页（trafilatura 三层抓取链，过 Cloudflare） | `solomon ingest https://example.com/article` |
+| 文本 / 按名称搜视频 | `solomon ingest --text "内容"` / `--name 标题` |
+
+视频全链路：下载 → B站 AI 字幕/转写（sherpa-onnx，无 torch）→ 关键帧 → 识图 → 结构化笔记 → 五层提炼 → 图文入库 → 自动 postprocess（FTS 索引/相关页/index/log/verify）。断点续跑、质量门槛 CHECKPOINT B、长视频分段、英文视频中文化。
+
+### 💬 问答与图文
+
+- FTS5 全文检索 + LLM 综合回答（结论/依据/延伸，带 `[[来源]]` 引用）
+- **图文问答**：命中页面配图 → LLM 按需引用 `MEDIA:` → QQ/飞书/微信渠道直接发图
+- 临时学习区（`--peek` 先看不入库）、联合检索（`--scope all` 标 📌）、转正
+- 语义缓存 + 流式输出（首问 61s → 命中 0.7s）
+
+### 🛣️ 多渠道路由（Hermes 全家桶，确定性路由不经 LLM）
+
+消息进网关走**确定性路由链**（`help → confirm → 默认路由 → delete → remember → clean → ingest → peek → promote`），全部程序化匹配、不依赖 LLM 判断：
+
+| 指令 | 作用 |
+|---|---|
+| `@help` | 命令手册（路由第一位，实时同步实现） |
+| `@newsolomon 入库 <链接/文件>` | 入库（视频/网页/飞书/文件/文本，`--images` 配图、批量后缀、标题指定） |
+| `@newsolomon 临时读取 / 转正 / 清理缓存` | 临时学习区全流程（预览→确认两步） |
+| `@newsolomon 删除 <标题>` | 删全关联（页/raw/图片/index/log/FTS/反向引用，dry-run→确认） |
+| `@newsolomon 记住：xxx` | 个人档案自增长（双向同步） |
+| `@solomon / @@solomon` | 问答 / 本会话默认路由（免 @） |
+| `确认删除/确认清理缓存`（裸文本） | 两步确认应答，序位在默认路由之前 |
+
+配套：**会话续接**（resume 撞锁自动清死锁重试、故障兜底保 sid，上下文不断链）、飞书 @提及兼容、渠道原生发图（QQ chunked upload / 飞书 image）、多语言渠道（QQ/飞书/微信/邮件）。
+
+### 🧠 学习与记忆
+
+- **学习路线自动沉淀**：`memories/roadmaps/<线>.md` 多路线分文件，概念问答后自动归入对应路线（cron 每日增量 + MEMORY.md 指针 + SOUL 协议三层防遗忘）
+- **个人档案自增长**：`entities/用户档案.md`，三入口自动收录/主动追加
+- **vault 自动备份**：数据一变事件驱动推 GitHub 私有仓 + 每日兜底
+- 删除/去重/清理全走确定性脚本（禁手拼 rm），可 dry-run 预览
+
+### ⚙️ 运维友好
+
+- `solomon doctor` 环境自检一键定位问题
+- **`solomon config` 图形配置向导**（浏览器界面，纯 stdlib 零依赖）：LLM 端点 / 知识库存放位置（Windows 盘符 / WSL 挂载 / 云服务器自动转换）/ 渠道凭据 / 代理，三层配置（.env 管线 + config.yaml agent）一键统一
+- `solomon index update/build`、`solomon verify` 维护命令齐备
+
 ## 快速开始（路线 A：核心 CLI，人人可用）
 
 ```bash
